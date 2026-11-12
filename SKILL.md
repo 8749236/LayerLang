@@ -1,15 +1,15 @@
 ---
 name: layerlang-mvp
-description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.4 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, and resource/code inspection reports. Use when the user mentions 图层语言、Layerlang、pw/ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, parameterized refs, cross-layer property access, absolute-pixel geometry, user-defined sugar, or photorealistic artwork; those are outside v0.4.
+description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.5 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, and resource/code inspection reports. Use when the user mentions 图层语言、Layerlang、pw/ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, parameterized refs, cross-layer property access, absolute-pixel geometry, user-defined sugar, or photorealistic artwork; those are outside v0.5.
 ---
 
-# Layerlang v0.4
+# Layerlang v0.5
 
-使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。把语言规范视为语义权威，把本文件只视为使用流程。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.4 使用按轴 anchor desugar，并以 `resource/code` 报告替代旧 `source/source_span`。
+使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。把语言规范视为语义权威，把本文件只视为使用流程。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.5 只把尺寸文法迁移为“数字＋单位”的后缀写法；旧前缀直接报错。anchor、坐标求值和 `resource/code` 报告沿用 v0.4 语义。
 
 ## 准备
 
-1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_4.md](references/layerlang_v0_4.md)。
+1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_5.md](references/layerlang_v0_5.md)。
 2. 使用 [scripts/layerlang_mvp.py](scripts/layerlang_mvp.py)，不要为每次任务重新实现解析器。
 3. 确保 Python 环境具有 Pillow；文字和图片会统一转换为内嵌 PNG。
 4. 只使用当前规范，不要把“已废弃方案”或“未来脑洞”当成可用语法。
@@ -19,22 +19,22 @@ description: Generate, edit, render, and inspect deterministic SVG graphics with
 1. 确定全局画布尺寸；用户未指定时使用 `1200×1200`。
 2. 先铺大色块，再添加文字、图片、引用和局部色块。只有需要局部坐标参照时才创建父容器。
 3. 普通色块使用 `fill`；文字前景使用 `color`。绘制顺序始终是 `fill → 当前内容或 ref 展开内容 → 自有子节点`。
-4. 所有尺寸显式携带单位。使用 `pw/ph` 访问父尺寸，使用 `w/h` 仅在 `xo/yo` 中访问当前尺寸。
-5. 对 text/image 使用 `a` 读取固有尺寸；省略 `w/h` 等价于 `a100`。需要等比缩放时显式给两个相同比例。
+4. 所有尺寸使用“数字＋单位”，数值与单位之间不留空白，例如 `100pw、1/12ph、-1/2w、50a`。使用 `pw/ph` 访问父尺寸，使用 `w/h` 仅在 `xo/yo` 中访问当前尺寸；旧版 `pw100` 等前缀写法直接报错。
+5. 对 text/image 使用 `a` 读取固有尺寸；省略 `w/h` 等价于 `100a`。需要等比缩放时显式给两个相同比例。
 6. 渲染并检查 SVG、越界报告、源范围和必要的坐标命中结果。
 
 示例：
 
 ```text
 [
-    w=pw100; h=ph100; fill=#ffffff
+    w=100pw; h=100ph; fill=#ffffff
     |
     text="Hello world; [draft]";
     anchor=center; color=#202020
     |
     image="local image.png";
-    x=pw1/4; y=ph1/4;
-    w=a50; h=a50;
+    x=1/4pw; y=1/4ph;
+    w=50a; h=50a;
     fill=#f2c94c
 ]
 ```
@@ -65,14 +65,14 @@ description: Generate, edit, render, and inspect deterministic SVG graphics with
 底边：anchor=bottom
 ```
 
-它们分别等价于 `x=pw100;xo=w-100` 与 `y=ph100;yo=h-100`，只占用对应轴，另一轴仍可手写。对齐相对父矩形，目标是 layer 矩形边缘；文字位图的字体度量不保证视觉墨迹也贴边。
+它们分别等价于 `x=100pw;xo=-100w` 与 `y=100ph;yo=-100h`，只占用对应轴，另一轴仍可手写。对齐相对父矩形，目标是 layer 矩形边缘；文字位图的字体度量不保证视觉墨迹也贴边。
 
 整数 `N` 表示 `N/100`，分数 `a/b` 直接表示 `a/b`，不要混淆：
 
 ```text
-pw5    = 5/100 = 5%
-pw5/2  = 5/2   = 250%
-pw1/40 = 1/40  = 2.5%
+5pw    = 5/100 = 5%
+5/2pw  = 5/2   = 250%
+1/40pw = 1/40  = 2.5%
 ```
 
 元素异常飞出时，先检查 JSON 的 `outside.partial`、`outside.full` 和 `rect_px/rect_exact`，再修改输入；不要用百分比反复猜像素位置。
@@ -89,13 +89,13 @@ horizontal = null | left | center | right
 非 null 值的展开规则：
 
 ```text
-left   → x=pw0;xo=w0
-center → x=pw1/2;xo=w-1/2       （水平）
-right  → x=pw100;xo=w-100
+left   → x=0pw;xo=0w
+center → x=1/2pw;xo=-1/2w       （水平）
+right  → x=100pw;xo=-100w
 
-top    → y=ph0;yo=h0
-center → y=ph1/2;yo=h-1/2       （垂直）
-bottom → y=ph100;yo=h-100
+top    → y=0ph;yo=0h
+center → y=1/2ph;yo=-1/2h       （垂直）
+bottom → y=100ph;yo=-100h
 ```
 
 `null` 表示不管这根轴，不生成属性，也不占用它；`top/left` 虽然展开为零，仍占用对应轴。`null-null` 是什么都不做的完整形式，日常通常直接省略 anchor。
@@ -112,11 +112,11 @@ center=center-center
 冲突由展开 key 决定。被 anchor 占用的属性不能再手写，另一根 null 轴可以：
 
 ```text
-anchor=right;y=ph1/2;yo=h-1/2    合法，等价于 center-right
-anchor=right;x=pw1/2             错误
-anchor=top;y=ph1/2               错误
-anchor=center;xo=w10             错误，不表示居中后偏移
-anchor=null-null;x=pw1/2         合法，anchor 是空操作
+anchor=right;y=1/2ph;yo=-1/2h    合法，等价于 center-right
+anchor=right;x=1/2pw             错误
+anchor=top;y=1/2ph               错误
+anchor=center;xo=10w             错误，不表示居中后偏移
+anchor=null-null;x=1/2pw         合法，anchor 是空操作
 ```
 
 属性顺序不影响冲突或求值。anchor 不支持后间距，也不是用户自定义 sugar 或多个 sugar 组合机制。
@@ -175,21 +175,21 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 管道输出；sub
 python3 scripts/layerlang_mvp.py self-test
 ```
 
-确保 58 项自测全部通过。
+确保 59 项自测全部通过。
 
 ## 绝对像素与复杂局部
 
-需要绝对间距、像素级对齐或复杂局部绘制时，用 Python 等外部工具生成确定性 PNG，再通过 image 或 ref 叠回。不要用 `xo=w-48` 凑 48px；它表示当前宽度的 48%。Layerlang 负责快速原型布局与验证，外部图片内部无需几何化。
+需要绝对间距、像素级对齐或复杂局部绘制时，用 Python 等外部工具生成确定性 PNG，再通过 image 或 ref 叠回。不要用 `xo=-48w` 凑 48px；它表示当前宽度的 48%。Layerlang 负责快速原型布局与验证，外部图片内部无需几何化。
 
 ## 排错
 
 - 根据错误中的文件、行列和节点路径修复输入，不要修改规范来迎合错误输入。
-- 遇到裸数字时补上明确单位；牢记 `pw1` 是 1%，`pw1/1` 才是 100%。
+- 遇到裸数字时补上明确后缀单位；牢记 `1pw` 是 1%，`1/1pw` 才是 100%。旧版 `pw1`、`ph1/12`、`w-1/2`、`h-1/2`、`a100` 不再接受，应分别改为 `1pw`、`1/12ph`、`-1/2w`、`-1/2h`、`100a`。
 - 普通色块不要使用旧版 `color`，改用 `fill`。
 - 普通 primitive 和 ref 没有固有尺寸，不要使用 `a`；ref 必须显式写 `w/h`。
 - 引号只在值首生效；不要发明单引号、`\n` 或其他转义。
 - ref 报错时沿 `@定义名` 路径和引用链定位，不要通过暴露内部属性绕开封装。
-- 用户要求表达式、裁剪、多行富文本、URL 图片、参数化 ref、跨层属性访问、绝对像素几何、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.4，不要发明临时语法。
+- 用户要求表达式、裁剪、多行富文本、URL 图片、参数化 ref、跨层属性访问、绝对像素几何、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.5，不要发明临时语法。
 
 ## 视觉反馈
 

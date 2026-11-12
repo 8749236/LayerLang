@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Layerlang v0.4：矩形、文字、本地图片、本地引用与可溯源图层检查。
+"""Layerlang v0.5：矩形、文字、本地图片、本地引用与可溯源图层检查。
 
 依赖：Python 标准库与 Pillow。
   python3 layerlang_mvp.py self-test
@@ -31,7 +31,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-SPEC_VERSION = "0.4"
+SPEC_VERSION = "0.5"
 HERE = Path(__file__).resolve().parent
 
 
@@ -304,7 +304,7 @@ def outside_status(rect: Rect, canvas: Rect) -> str:
 
 
 LINUX_DEFAULT_FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-DIMENSION_RE = re.compile(r"^(a|pw|ph|w|h)(-?\d+(?:/\d+)?)$")
+DIMENSION_RE = re.compile(r"^(-?\d+(?:/\d+)?)(pw|ph|w|h|a)$")
 COMMON_ATTRS = {"x", "y", "w", "h", "xo", "yo", "anchor", "fill"}
 TEXT_ATTRS = {"text", "font", "size", "color"}
 IMAGE_ATTRS = {"image"}
@@ -393,8 +393,8 @@ class RefContext:
 def parse_dimension(attr, source: str, allowed: set[str]) -> Dimension:
     match = DIMENSION_RE.fullmatch(attr.value)
     if not match:
-        raise LangError(f"{attr.name} 必须使用 单位+数字，例如 pw100、ph1/12、a50、w-1/2；收到 {attr.value!r}", source, attr.position)
-    unit, number = match.groups()
+        raise LangError(f"{attr.name} 必须使用 数字+单位，例如 100pw、1/12ph、50a、-1/2w；收到 {attr.value!r}", source, attr.position)
+    number, unit = match.groups()
     if unit not in allowed:
         raise LangError(f"{attr.name} 不允许单位 {unit}；允许：{sorted(allowed)}", source, attr.position)
     if "/" in number:
@@ -690,7 +690,7 @@ def build_scene(source: str, width: int = 1200, height: int = 1200, resource_dir
 def render_svg(scene: Scene) -> str:
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{scene.width}" height="{scene.height}" viewBox="0 0 {scene.width} {scene.height}">',
-        "  <!-- Layerlang v0.4: deterministic layers; content is scaled without preserving aspect ratio. -->",
+        "  <!-- Layerlang v0.5: deterministic layers; content is scaled without preserving aspect ratio. -->",
     ]
     for index, node in enumerate(scene.layers):
         rect = node.rect
@@ -758,13 +758,15 @@ def scene_report(scene: Scene, hit_point: Optional[tuple[str, str]] = None) -> d
 
 class RectTests(unittest.TestCase):
     def test_01_full_black_canvas(self) -> None:
-        scene = build_scene("[w=pw100;h=ph100;fill=#000000]", 1200, 630)
+        scene = build_scene("[w=100pw;h=100ph;fill=#000000]", 1200, 630)
         self.assertEqual(len(scene.layers), 1)
         self.assertEqual(scene.layers[0].rect, Rect(Fraction(0), Fraction(0), Fraction(1200), Fraction(630)))
-        self.assertIn('fill="#000000"', render_svg(scene))
+        svg = render_svg(scene)
+        self.assertIn('fill="#000000"', svg)
+        self.assertIn('xmlns="http://www.w3.org/2000/svg"', svg)
 
     def test_02_siblings_share_parent_and_draw_left_to_right(self) -> None:
-        source = "[w=pw100;h=ph100|w=pw1/2;h=ph100;fill=#ff0000|x=pw1/4;w=pw1/2;h=ph100;fill=#0000ff]"
+        source = "[w=100pw;h=100ph|w=1/2pw;h=100ph;fill=#ff0000|x=1/4pw;w=1/2pw;h=100ph;fill=#0000ff]"
         scene = build_scene(source)
         self.assertEqual([node.path for node in scene.layers], ["0", "0/0", "0/1"])
         self.assertEqual(scene.layers[1].rect.x, 0)
@@ -773,12 +775,12 @@ class RectTests(unittest.TestCase):
         self.assertLess(svg.index("#ff0000"), svg.index("#0000ff"))
 
     def test_03_own_size_offsets_center_a_block(self) -> None:
-        source = "[w=pw100;h=ph100|x=pw1/2;y=ph1/2;w=pw1/4;h=ph1/4;xo=w-1/2;yo=h-1/2;fill=#000000]"
+        source = "[w=100pw;h=100ph|x=1/2pw;y=1/2ph;w=1/4pw;h=1/4ph;xo=-1/2w;yo=-1/2h;fill=#000000]"
         scene = build_scene(source)
         self.assertEqual(scene.layers[1].rect, Rect(Fraction(450), Fraction(450), Fraction(300), Fraction(300)))
 
     def test_04_children_are_not_clipped_by_parent(self) -> None:
-        source = "[x=pw1/4;y=ph1/4;w=pw1/4;h=ph1/4|x=pw1/1;w=pw1/2;h=ph1/2;fill=#ff0000]"
+        source = "[x=1/4pw;y=1/4ph;w=1/4pw;h=1/4ph|x=1/1pw;w=1/2pw;h=1/2ph;fill=#ff0000]"
         scene = build_scene(source)
         child = scene.layers[1]
         self.assertEqual(child.rect, Rect(Fraction(600), Fraction(300), Fraction(150), Fraction(150)))
@@ -786,7 +788,7 @@ class RectTests(unittest.TestCase):
         self.assertNotIn("<clipPath", render_svg(scene))
 
     def test_05_fully_outside_layer_is_reported(self) -> None:
-        source = "[w=pw100;h=ph100|x=pw2/1;w=pw1/4;h=ph1/4;fill=#ff0000]"
+        source = "[w=100pw;h=100ph|x=2/1pw;w=1/4pw;h=1/4ph;fill=#ff0000]"
         scene = build_scene(source)
         report = scene_report(scene)
         self.assertEqual(report["outside"], {"partial": [], "full": ["0/0"]})
@@ -794,7 +796,7 @@ class RectTests(unittest.TestCase):
 
     def test_fraction_and_percent_have_distinct_exact_rules(self) -> None:
         scene = build_scene(
-            "[w=pw100;h=ph100|w=pw1/12;h=ph100;fill=#ff0000|w=pw1;h=ph1/2;fill=#000000|w=pw50;h=ph100;fill=#ffffff]"
+            "[w=100pw;h=100ph|w=1/12pw;h=100ph;fill=#ff0000|w=1pw;h=1/2ph;fill=#000000|w=50pw;h=100ph;fill=#ffffff]"
         )
         self.assertEqual(scene.layers[0].rect.w, 1200)
         self.assertEqual(scene.layers[1].rect.w, 100)
@@ -803,58 +805,72 @@ class RectTests(unittest.TestCase):
         self.assertEqual(scene.layers[3].rect.w, 600)
 
     def test_parent_final_offset_rect_is_child_reference(self) -> None:
-        source = "[x=pw1/4;w=pw1/2;h=ph100;xo=pw-1/12|w=pw100;h=ph100;fill=#000000]"
+        source = "[x=1/4pw;w=1/2pw;h=100ph;xo=-1/12pw|w=100pw;h=100ph;fill=#000000]"
         scene = build_scene(source)
         self.assertEqual(scene.layers[0].rect.x, 200)
         self.assertEqual(scene.layers[1].rect.x, 200)
 
     def test_hit_returns_bottom_to_top_including_containers(self) -> None:
-        source = "[w=pw100;h=ph100|w=pw100;h=ph100;fill=#ffffff|x=pw1/4;y=ph1/4;w=pw1/2;h=ph1/2;fill=#000000]"
+        source = "[w=100pw;h=100ph|w=100pw;h=100ph;fill=#ffffff|x=1/4pw;y=1/4ph;w=1/2pw;h=1/2ph;fill=#000000]"
         scene = build_scene(source)
         self.assertEqual([node.path for node in hit(scene, 600, 600)], ["0", "0/0", "0/1"])
         self.assertEqual([node.path for node in hit(scene, 10, 10)], ["0", "0/0"])
         self.assertEqual(hit(scene, -1, 10), [])
 
     def test_prettify_does_not_change_semantics(self) -> None:
-        compact = "[w=pw100;h=ph100|x=pw1/2;y=ph1/2;w=pw1/4;h=ph1/4;xo=w-1/2;yo=h-1/2;fill=#000000]"
+        compact = "[w=100pw;h=100ph|x=1/2pw;y=1/2ph;w=1/4pw;h=1/4ph;xo=-1/2w;yo=-1/2h;fill=#000000]"
         pretty = """[
-            w=pw100; h=ph100
+            w=100pw; h=100ph
             |
-            x=pw1/2; y=ph1/2;
-            w=pw1/4; h=ph1/4;
-            xo=w-1/2; yo=h-1/2;
+            x=1/2pw; y=1/2ph;
+            w=1/4pw; h=1/4ph;
+            xo=-1/2w; yo=-1/2h;
             fill=#000000;
         ]"""
         self.assertEqual(render_svg(build_scene(compact)), render_svg(build_scene(pretty)))
 
     def test_multiple_roots_keep_document_order(self) -> None:
-        source = "[w=pw100;h=ph100;fill=#ffffff][w=pw1/2;h=ph100;fill=#000000]"
+        source = "[w=100pw;h=100ph;fill=#ffffff][w=1/2pw;h=100ph;fill=#000000]"
         svg = render_svg(build_scene(source))
         self.assertLess(svg.index("#ffffff"), svg.index("#000000"))
 
     def test_rejects_bare_numbers(self) -> None:
-        with self.assertRaisesRegex(LangError, "单位\\+数字"):
-            build_scene("[w=100;h=ph100]")
+        with self.assertRaisesRegex(LangError, "数字\\+单位"):
+            build_scene("[w=100;h=100ph]")
+
+    def test_rejects_all_legacy_prefix_units(self) -> None:
+        legacy_sources = [
+            "[x=pw100;w=100pw;h=100ph]",
+            "[x=pw1/2;w=100pw;h=100ph]",
+            "[y=ph100;w=100pw;h=100ph]",
+            "[xo=w-1/2;w=100pw;h=100ph]",
+            "[yo=h-1/2;w=100pw;h=100ph]",
+            "[text=测试;w=a100]",
+        ]
+        for source in legacy_sources:
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(LangError, "数字\\+单位"):
+                    build_scene(source)
 
     def test_rejects_current_size_unit_in_width(self) -> None:
         with self.assertRaisesRegex(LangError, "不允许单位 w"):
-            build_scene("[w=w100;h=ph100]")
+            build_scene("[w=100w;h=100ph]")
 
     def test_rejects_unknown_duplicate_and_nonpositive(self) -> None:
         with self.assertRaisesRegex(LangError, "未知属性"):
-            build_scene("[w=pw100;h=ph100;aspect=1]")
+            build_scene("[w=100pw;h=100ph;aspect=1]")
         with self.assertRaisesRegex(LangError, "重复"):
-            build_scene("[w=pw100;w=pw50;h=ph100]")
+            build_scene("[w=100pw;w=50pw;h=100ph]")
         with self.assertRaisesRegex(LangError, "必须大于零"):
-            build_scene("[w=pw0;h=ph100]")
+            build_scene("[w=0pw;h=100ph]")
 
     def test_rejects_bad_structure_and_color(self) -> None:
         with self.assertRaisesRegex(LangError, "空的"):
-            build_scene("[w=pw100;h=ph100|]")
+            build_scene("[w=100pw;h=100ph|]")
         with self.assertRaisesRegex(LangError, "六位"):
-            build_scene("[w=pw100;h=ph100;fill=#000]")
+            build_scene("[w=100pw;h=100ph;fill=#000]")
         with self.assertRaisesRegex(LangError, "嵌套括号"):
-            build_scene("[w=pw100;h=ph100[w=pw50;h=ph50]]")
+            build_scene("[w=100pw;h=100ph[w=50pw;h=50ph]]")
 
 
 
@@ -870,13 +886,13 @@ class TextTests(unittest.TestCase):
         self.assertEqual(node.metadata["size_px"], 40)
 
     def test_auto_text_can_center_with_own_offsets(self) -> None:
-        scene = build_scene("[w=pw100;h=ph100|text=测试;size=40;x=pw1/2;y=ph1/2;xo=w-1/2;yo=h-1/2]")
+        scene = build_scene("[w=100pw;h=100ph|text=测试;size=40;x=1/2pw;y=1/2ph;xo=-1/2w;yo=-1/2h]")
         node = scene.layers[1]
         self.assertEqual(node.rect.x + node.rect.w / 2, 600)
         self.assertEqual(node.rect.y + node.rect.h / 2, 600)
 
     def test_auto_scaling_is_explicitly_nonuniform(self) -> None:
-        scene = build_scene("[text=测试;size=40;w=a50;h=a100]")
+        scene = build_scene("[text=测试;size=40;w=50a;h=100a]")
         node = scene.layers[0]
         assert node.intrinsic is not None
         self.assertEqual(node.rect.w, Fraction(node.intrinsic[0], 2))
@@ -884,7 +900,7 @@ class TextTests(unittest.TestCase):
         self.assertIn('preserveAspectRatio="none"', render_svg(scene))
 
     def test_parent_dimensions_can_stretch_text_bitmap(self) -> None:
-        scene = build_scene("[text=测试;size=40;w=pw50;h=ph1/4]")
+        scene = build_scene("[text=测试;size=40;w=50pw;h=1/4ph]")
         self.assertEqual(scene.layers[0].rect.w, 600)
         self.assertEqual(scene.layers[0].rect.h, 300)
 
@@ -896,7 +912,7 @@ class TextTests(unittest.TestCase):
         self.assertEqual(report["layers"][0]["content_metadata"]["foreground"], "#202020")
 
     def test_text_can_be_parent_without_clipping_children(self) -> None:
-        scene = build_scene("[text=父;size=40|x=pw2/1;w=pw100;h=ph100;fill=#ff0000]")
+        scene = build_scene("[text=父;size=40|x=2/1pw;w=100pw;h=100ph;fill=#ff0000]")
         child = scene.layers[1]
         self.assertGreater(child.rect.x, scene.layers[0].rect.right)
         self.assertNotIn("<clipPath", render_svg(scene))
@@ -905,7 +921,7 @@ class TextTests(unittest.TestCase):
         with self.assertRaisesRegex(LangError, "类型头"):
             build_scene("[size=40;text=测试]")
         with self.assertRaisesRegex(LangError, "不允许单位 a"):
-            build_scene("[w=a100;h=ph100]")
+            build_scene("[w=100a;h=100ph]")
 
     def test_default_size_is_forty_pixels(self) -> None:
         node = build_scene("[text=测试]").layers[0]
@@ -913,9 +929,9 @@ class TextTests(unittest.TestCase):
 
     def test_rejects_zero_and_negative_size(self) -> None:
         with self.assertRaisesRegex(LangError, "必须大于零"):
-            build_scene("[text=测试;size=40;w=a0]")
+            build_scene("[text=测试;size=40;w=0a]")
         with self.assertRaisesRegex(LangError, "必须大于零"):
-            build_scene("[text=测试;size=40;w=a-50]")
+            build_scene("[text=测试;size=40;w=-50a]")
         with self.assertRaisesRegex(LangError, "正整数"):
             build_scene("[text=测试;size=0]")
 
@@ -924,7 +940,7 @@ class TextTests(unittest.TestCase):
             build_scene("[text=hello world;size=40]")
 
     def test_hit_uses_scaled_rect(self) -> None:
-        scene = build_scene("[w=pw100;h=ph100|text=测试;size=40;x=pw1/2;y=ph1/2;xo=w-1/2;yo=h-1/2]")
+        scene = build_scene("[w=100pw;h=100ph|text=测试;size=40;x=1/2pw;y=1/2ph;xo=-1/2w;yo=-1/2h]")
         paths = [node.path for node in hit(scene, 600, 600)]
         self.assertEqual(paths, ["0", "0/0"])
 
@@ -1016,9 +1032,9 @@ class ImageTests(unittest.TestCase):
         self.assertEqual(node.metadata["source_format"], "PNG")
 
     def test_image_auto_scaling_and_parent_stretch(self) -> None:
-        scaled = self.build("[image=sample.png;w=a50;h=a200]").layers[0]
+        scaled = self.build("[image=sample.png;w=50a;h=200a]").layers[0]
         self.assertEqual((scaled.rect.w, scaled.rect.h), (20, 40))
-        stretched = self.build("[image=sample.png;w=pw50;h=ph1/4]").layers[0]
+        stretched = self.build("[image=sample.png;w=50pw;h=1/4ph]").layers[0]
         self.assertEqual((stretched.rect.w, stretched.rect.h), (600, 300))
 
     def test_image_alpha_survives_png_normalization(self) -> None:
@@ -1030,7 +1046,7 @@ class ImageTests(unittest.TestCase):
             self.assertEqual(image.getpixel((12, 8)), (255, 0, 0, 255))
 
     def test_fill_precedes_image_and_image_can_be_parent(self) -> None:
-        scene = self.build("[image=sample.png;fill=#f2c94c|x=pw2/1;w=pw100;h=ph100;fill=#ff0000]")
+        scene = self.build("[image=sample.png;fill=#f2c94c|x=2/1pw;w=100pw;h=100ph;fill=#ff0000]")
         svg = render_svg(scene)
         self.assertLess(svg.index("<rect"), svg.index("<image"))
         self.assertGreater(scene.layers[1].rect.x, scene.layers[0].rect.right)
@@ -1047,7 +1063,7 @@ class ImageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "无法读取图片"):
             self.build("[image=missing.png]")
         with self.assertRaisesRegex(LangError, "类型头"):
-            self.build("[w=pw100;image=sample.png]")
+            self.build("[w=100pw;image=sample.png]")
 
     def test_windows_absolute_paths_are_not_misclassified_as_urls(self) -> None:
         for source_name in (
@@ -1068,7 +1084,7 @@ class RefTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.directory = Path(self.temporary.name)
-        self.write("card", "[w=pw100;h=ph100;fill=#ffffff|x=pw1/4;y=ph1/4;w=pw1/2;h=ph1/2;fill=#ff0000]")
+        self.write("card", "[w=100pw;h=100ph;fill=#ffffff|x=1/4pw;y=1/4ph;w=1/2pw;h=1/2ph;fill=#ff0000]")
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -1082,7 +1098,7 @@ class RefTests(unittest.TestCase):
         return build_scene(source, resource_dir=self.directory, source_path=main)
 
     def test_basic_ref_expands_into_instance_rect(self) -> None:
-        scene = self.build("[ref=card;w=pw1/2;h=ph1/4]")
+        scene = self.build("[ref=card;w=1/2pw;h=1/4ph]")
         self.assertEqual([node.path for node in scene.layers], ["0", "0@card/0", "0@card/0/0"])
         self.assertEqual(scene.layers[0].rect, Rect(Fraction(0), Fraction(0), Fraction(600), Fraction(300)))
         self.assertEqual(scene.layers[1].rect, scene.layers[0].rect)
@@ -1090,7 +1106,7 @@ class RefTests(unittest.TestCase):
         self.assertEqual(scene.layers[2].rect.y, 75)
 
     def test_repeated_refs_have_independent_instances(self) -> None:
-        scene = self.build("[w=pw100;h=ph100|ref=card;w=pw1/2;h=ph100|ref=card;x=pw1/2;w=pw1/2;h=ph100]")
+        scene = self.build("[w=100pw;h=100ph|ref=card;w=1/2pw;h=100ph|ref=card;x=1/2pw;w=1/2pw;h=100ph]")
         centers = [node.path for node in scene.layers]
         self.assertIn("0/0@card/0/0", centers)
         self.assertIn("0/1@card/0/0", centers)
@@ -1100,9 +1116,9 @@ class RefTests(unittest.TestCase):
         self.assertEqual(second.rect.x, 750)
 
     def test_nested_refs_and_content_order(self) -> None:
-        self.write("badge", "[w=pw100;h=ph100;fill=#0000ff]")
-        self.write("outer", "[ref=badge;w=pw100;h=ph100]")
-        scene = self.build("[ref=outer;w=pw100;h=ph100;fill=#f2c94c|w=pw100;h=ph100;fill=#202020]")
+        self.write("badge", "[w=100pw;h=100ph;fill=#0000ff]")
+        self.write("outer", "[ref=badge;w=100pw;h=100ph]")
+        scene = self.build("[ref=outer;w=100pw;h=100ph;fill=#f2c94c|w=100pw;h=100ph;fill=#202020]")
         self.assertEqual(
             [node.path for node in scene.layers],
             ["0", "0@outer/0", "0@outer/0@badge/0", "0/0"],
@@ -1110,41 +1126,41 @@ class RefTests(unittest.TestCase):
 
     def test_ref_can_contain_text_and_be_parent(self) -> None:
         self.write("label", "[text=引用;size=40]")
-        scene = self.build("[ref=label;w=pw100;h=ph100|x=pw2/1;w=pw100;h=ph100;fill=#ff0000]")
+        scene = self.build("[ref=label;w=100pw;h=100ph|x=2/1pw;w=100pw;h=100ph;fill=#ff0000]")
         self.assertEqual(scene.layers[1].kind, "text")
         self.assertGreater(scene.layers[2].rect.x, scene.layers[0].rect.right)
         self.assertNotIn("<clipPath", render_svg(scene))
 
     def test_direct_and_indirect_cycles_are_rejected(self) -> None:
-        self.write("a", "[ref=a;w=pw100;h=ph100]")
+        self.write("a", "[ref=a;w=100pw;h=100ph]")
         with self.assertRaisesRegex(ValueError, "引用循环"):
-            self.build("[ref=a;w=pw100;h=ph100]")
-        self.write("a", "[ref=b;w=pw100;h=ph100]")
-        self.write("b", "[ref=a;w=pw100;h=ph100]")
+            self.build("[ref=a;w=100pw;h=100ph]")
+        self.write("a", "[ref=b;w=100pw;h=100ph]")
+        self.write("b", "[ref=a;w=100pw;h=100ph]")
         with self.assertRaisesRegex(ValueError, "引用循环"):
-            self.build("[ref=a;w=pw100;h=ph100]")
+            self.build("[ref=a;w=100pw;h=100ph]")
 
     def test_missing_auto_misplaced_and_path_refs_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "无法读取 ref"):
-            self.build("[ref=missing;w=pw100;h=ph100]")
+            self.build("[ref=missing;w=100pw;h=100ph]")
         with self.assertRaisesRegex(LangError, "不允许单位 a"):
-            self.build("[ref=card;w=a100;h=ph100]")
+            self.build("[ref=card;w=100a;h=100ph]")
         with self.assertRaisesRegex(LangError, "类型头"):
-            self.build("[w=pw100;ref=card;h=ph100]")
+            self.build("[w=100pw;ref=card;h=100ph]")
         with self.assertRaisesRegex(LangError, "定义名"):
-            self.build("[ref=../card;w=pw100;h=ph100]")
+            self.build("[ref=../card;w=100pw;h=100ph]")
         with self.assertRaisesRegex(LangError, "定义名"):
-            self.build("[ref=a@b;w=pw100;h=ph100]")
+            self.build("[ref=a@b;w=100pw;h=100ph]")
 
     def test_depth_guard(self) -> None:
         global MAX_REF_DEPTH
         original = MAX_REF_DEPTH
         MAX_REF_DEPTH = 2
         try:
-            self.write("a", "[ref=b;w=pw100;h=ph100]")
-            self.write("b", "[w=pw100;h=ph100]")
+            self.write("a", "[ref=b;w=100pw;h=100ph]")
+            self.write("b", "[w=100pw;h=100ph]")
             with self.assertRaisesRegex(ValueError, "深度超过上限"):
-                self.build("[ref=a;w=pw100;h=ph100]")
+                self.build("[ref=a;w=100pw;h=100ph]")
         finally:
             MAX_REF_DEPTH = original
 
@@ -1154,7 +1170,7 @@ class RefTests(unittest.TestCase):
         MAX_EXPANDED_NODES = 2
         try:
             with self.assertRaisesRegex(ValueError, "节点数超过上限"):
-                self.build("[ref=card;w=pw100;h=ph100]")
+                self.build("[ref=card;w=100pw;h=100ph]")
         finally:
             MAX_EXPANDED_NODES = original
 
@@ -1167,7 +1183,7 @@ class AnchorTests(unittest.TestCase):
             for horizontal in horizontal_x:
                 value = f"{vertical}-{horizontal}"
                 with self.subTest(anchor=value):
-                    node = build_scene(f"[w=pw1/4;h=ph1/4;anchor={value}]").layers[0]
+                    node = build_scene(f"[w=1/4pw;h=1/4ph;anchor={value}]").layers[0]
                     self.assertEqual(
                         node.rect,
                         Rect(
@@ -1194,34 +1210,34 @@ class AnchorTests(unittest.TestCase):
 
     def test_unoccupied_axes_accept_manual_attributes_in_any_order(self) -> None:
         equivalent_sources = [
-            "[w=pw1/4;h=ph1/4;anchor=right;y=ph1/2;yo=h-1/2]",
-            "[y=ph1/2;anchor=right;yo=h-1/2;w=pw1/4;h=ph1/4]",
-            "[w=pw1/4;h=ph1/4;anchor=center-right]",
+            "[w=1/4pw;h=1/4ph;anchor=right;y=1/2ph;yo=-1/2h]",
+            "[y=1/2ph;anchor=right;yo=-1/2h;w=1/4pw;h=1/4ph]",
+            "[w=1/4pw;h=1/4ph;anchor=center-right]",
         ]
         scenes = [build_scene(source) for source in equivalent_sources]
         self.assertEqual(render_svg(scenes[0]), render_svg(scenes[1]))
         self.assertEqual(render_svg(scenes[0]), render_svg(scenes[2]))
 
-        horizontal_center = build_scene("[w=pw1/4;h=ph1/4;anchor=null-center;y=ph100;yo=h-100]")
-        vertical_center = build_scene("[w=pw1/4;h=ph1/4;anchor=center-null;x=pw100;xo=w-100]")
+        horizontal_center = build_scene("[w=1/4pw;h=1/4ph;anchor=null-center;y=100ph;yo=-100h]")
+        vertical_center = build_scene("[w=1/4pw;h=1/4ph;anchor=center-null;x=100pw;xo=-100w]")
         self.assertEqual(horizontal_center.layers[0].rect, Rect(Fraction(450), Fraction(900), Fraction(300), Fraction(300)))
         self.assertEqual(vertical_center.layers[0].rect, Rect(Fraction(900), Fraction(450), Fraction(300), Fraction(300)))
 
-        manual = "[w=pw1/4;h=ph1/4;x=pw1/4;y=ph1/4;xo=w10;yo=h10]"
-        noop = "[w=pw1/4;h=ph1/4;anchor=null-null;x=pw1/4;y=ph1/4;xo=w10;yo=h10]"
+        manual = "[w=1/4pw;h=1/4ph;x=1/4pw;y=1/4ph;xo=10w;yo=10h]"
+        noop = "[w=1/4pw;h=1/4ph;anchor=null-null;x=1/4pw;y=1/4ph;xo=10w;yo=10h]"
         self.assertEqual(render_svg(build_scene(manual)), render_svg(build_scene(noop)))
 
     def test_conflicts_follow_all_expanded_keys_including_zero_axes(self) -> None:
         invalid_sources = [
-            "[w=pw100;h=ph100;anchor=right;x=pw1/2]",
-            "[w=pw100;h=ph100;anchor=right;xo=w10]",
-            "[w=pw100;h=ph100;anchor=top;y=ph1/2]",
-            "[w=pw100;h=ph100;anchor=top;yo=h10]",
-            "[w=pw100;h=ph100;anchor=left;x=pw0]",
-            "[w=pw100;h=ph100;anchor=top-right;y=ph1/2]",
-            "[w=pw100;h=ph100;anchor=null-center;x=pw1/2]",
-            "[w=pw100;h=ph100;anchor=center-null;y=ph1/2]",
-            "[text=hello;anchor=center;xo=w10]",
+            "[w=100pw;h=100ph;anchor=right;x=1/2pw]",
+            "[w=100pw;h=100ph;anchor=right;xo=10w]",
+            "[w=100pw;h=100ph;anchor=top;y=1/2ph]",
+            "[w=100pw;h=100ph;anchor=top;yo=10h]",
+            "[w=100pw;h=100ph;anchor=left;x=0pw]",
+            "[w=100pw;h=100ph;anchor=top-right;y=1/2ph]",
+            "[w=100pw;h=100ph;anchor=null-center;x=1/2pw]",
+            "[w=100pw;h=100ph;anchor=center-null;y=1/2ph]",
+            "[text=hello;anchor=center;xo=10w]",
         ]
         for source in invalid_sources:
             with self.subTest(source=source):
@@ -1250,10 +1266,10 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(span["start"], {"offset": 1, "line": 1, "column": 2})
             self.assertEqual(span["end"]["offset"], len(source) - 1)
 
-            card_source = '[w=pw100;h=ph100|text="组件"]'
+            card_source = '[w=100pw;h=100ph|text="组件"]'
             card = directory / "card.txt"
             card.write_text(card_source, encoding="utf-8")
-            main_source = "[ref=card;w=pw1/2;h=ph100][ref=card;x=pw1/2;w=pw1/2;h=ph100]"
+            main_source = "[ref=card;w=1/2pw;h=100ph][ref=card;x=1/2pw;w=1/2pw;h=100ph]"
             main.write_text(main_source, encoding="utf-8")
             ref_report = scene_report(build_scene(main_source, source_path=main))
             internal = ref_report["layers"][2]
@@ -1276,7 +1292,7 @@ class ReportTests(unittest.TestCase):
             pixel = directory / "pixel.png"
             Image.new("RGBA", (2, 3), (255, 0, 0, 255)).save(pixel)
             main = directory / "main.txt"
-            source = "[image=pixel.png][text=测试][w=pw100;h=ph100]"
+            source = "[image=pixel.png][text=测试][w=100pw;h=100ph]"
             main.write_text(source, encoding="utf-8")
             report = scene_report(build_scene(source, resource_dir=directory, source_path=main))
             image_layer, text_layer, rect_layer = report["layers"]
@@ -1290,15 +1306,15 @@ class ReportTests(unittest.TestCase):
                 self.assertNotIn("source_span", layer)
                 self.assertEqual(layer["code"]["file"], str(main.resolve()))
 
-            memory_layer = scene_report(build_scene("[w=pw100;h=ph100]"))["layers"][0]
+            memory_layer = scene_report(build_scene("[w=100pw;h=100ph]"))["layers"][0]
             self.assertIsNone(memory_layer["resource"])
             self.assertIsNone(memory_layer["code"]["file"])
             self.assertIn("offset", memory_layer["code"]["start"])
 
     def test_scale_reports_natural_uniform_and_nonuniform_states(self) -> None:
         report = scene_report(build_scene(
-            "[text=测试][text=测试;w=a50;h=a50]"
-            "[text=测试;w=a50;h=a100][w=pw100;h=ph100]"
+            "[text=测试][text=测试;w=50a;h=50a]"
+            "[text=测试;w=50a;h=100a][w=100pw;h=100ph]"
         ))
         self.assertEqual(report["layers"][0]["scale"], [1, 1])
         self.assertEqual(report["layers"][1]["scale"], [0.5, 0.5])
@@ -1310,8 +1326,8 @@ class ReportTests(unittest.TestCase):
             directory = Path(temporary)
             main = directory / "main.txt"
             card = directory / "card.txt"
-            main_source = "\r\n[ref=card;w=pw100;h=ph100]\r\n"
-            card_source = '\r\n[w=pw100;h=ph100;fill=#ffffff|\r\ntext=组件]\r\n'
+            main_source = "\r\n[ref=card;w=100pw;h=100ph]\r\n"
+            card_source = '\r\n[w=100pw;h=100ph;fill=#ffffff|\r\ntext=组件]\r\n'
             with main.open("w", encoding="utf-8", newline="") as opened:
                 opened.write(main_source)
             with card.open("w", encoding="utf-8", newline="") as opened:
@@ -1340,8 +1356,8 @@ class ReportTests(unittest.TestCase):
             )
             report = json.loads(layers.read_text(encoding="utf-8"))
             expected = [
-                (main, "ref=card;w=pw100;h=ph100"),
-                (card, "w=pw100;h=ph100;fill=#ffffff"),
+                (main, "ref=card;w=100pw;h=100ph"),
+                (card, "w=100pw;h=100ph;fill=#ffffff"),
                 (card, "text=组件"),
             ]
             for layer, (source_path, source_fragment) in zip(report["layers"], expected):
@@ -1382,7 +1398,7 @@ class CliTests(unittest.TestCase):
                 )
 
             valid = directory / "valid.txt"
-            valid.write_text("[w=pw100;h=ph100;fill=#ffffff]", encoding="utf-8")
+            valid.write_text("[w=100pw;h=100ph;fill=#ffffff]", encoding="utf-8")
             succeeded = run_cli(valid, "valid")
             self.assertEqual(
                 succeeded.returncode,
@@ -1407,7 +1423,7 @@ class ErrorContextTests(unittest.TestCase):
             card = directory / "card.txt"
             card.write_text("[text=测试;font=missing.ttf]", encoding="utf-8")
             main = directory / "main.txt"
-            source = "[ref=card;w=pw100;h=ph100]"
+            source = "[ref=card;w=100pw;h=100ph]"
             main.write_text(source, encoding="utf-8")
             with self.assertRaises(EvaluationError) as caught:
                 build_scene(source, source_path=main)
@@ -1424,7 +1440,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Layerlang v0.4 渲染器")
+    parser = argparse.ArgumentParser(description="Layerlang v0.5 渲染器")
     subparsers = parser.add_subparsers(dest="command", required=True)
     render_parser = subparsers.add_parser("render")
     render_parser.add_argument("input")
