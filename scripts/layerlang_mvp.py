@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Layerlang v0.2：矩形、文字、本地图片、本地引用与图层检查。
+"""Layerlang v0.3：矩形、文字、本地图片、本地引用与可溯源图层检查。
 
 依赖：Python 标准库与 Pillow。
   python3 layerlang_mvp.py self-test
@@ -30,13 +30,14 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-SPEC_VERSION = "0.2"
+SPEC_VERSION = "0.3"
 HERE = Path(__file__).resolve().parent
 
 
 class LangError(Exception):
     def __init__(self, message: str, source: str = "", position: int = 0):
         self.message = message
+        self.source_path: Optional[str] = None
         self.position = max(0, min(position, len(source)))
         self.line = source.count("\n", 0, self.position) + 1
         previous_newline = source.rfind("\n", 0, self.position)
@@ -44,7 +45,22 @@ class LangError(Exception):
         super().__init__(str(self))
 
     def __str__(self) -> str:
-        return f"第 {self.line} 行，第 {self.column} 列：{self.message}"
+        prefix = f"{self.source_path}：" if self.source_path else ""
+        return f"{prefix}第 {self.line} 行，第 {self.column} 列：{self.message}"
+
+
+class EvaluationError(ValueError):
+    def __init__(self, message: str, source_span: dict[str, object], node_path: str):
+        self.message = message
+        self.source_span = source_span
+        self.node_path = node_path
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        start = self.source_span["start"]
+        assert isinstance(start, dict)
+        source = self.source_span["source"] or "<memory>"
+        return f"{source}：第 {start['line']} 行，第 {start['column']} 列（节点 {self.node_path}）：{self.message}"
 
 
 @dataclass
@@ -58,6 +74,7 @@ class Attr:
 class NodeSpec:
     attrs: dict[str, Attr]
     position: int
+    end: int
 
 
 @dataclass
@@ -134,8 +151,39 @@ class Parser:
             raise self.error("预期 ;、| 或 ]")
         return Group(segments[0], segments[1:])
 
+    def parse_quoted_value(self) -> tuple[str, int]:
+        opening = self.pos
+        self.pos += 1
+        decoded: list[str] = []
+        while self.pos < len(self.source):
+            char = self.source[self.pos]
+            if char == '"':
+                self.pos += 1
+                value_end = self.pos
+                self.skip_space()
+                if self.pos < len(self.source) and self.source[self.pos] not in ";|]":
+                    raise self.error("闭合引号后只允许空白、;、| 或 ]", self.pos)
+                return "".join(decoded), value_end
+            if char in "\r\n":
+                raise self.error("字符串不支持原始换行", self.pos)
+            if char == "\\":
+                escape_position = self.pos
+                self.pos += 1
+                if self.pos >= len(self.source):
+                    raise self.error("未闭合的双引号字符串", opening)
+                escaped = self.source[self.pos]
+                if escaped not in {'"', "\\"}:
+                    raise self.error("字符串只支持 \\\" 和 \\\\ 两种转义", escape_position)
+                decoded.append(escaped)
+                self.pos += 1
+                continue
+            decoded.append(char)
+            self.pos += 1
+        raise self.error("未闭合的双引号字符串", opening)
+
     def parse_segment(self) -> NodeSpec:
         segment_start = self.pos
+        segment_end = self.pos
         attrs: dict[str, Attr] = {}
         while True:
             self.skip_space()
@@ -151,32 +199,56 @@ class Parser:
             self.pos += 1
             self.skip_space()
             value_start = self.pos
-            while self.pos < len(self.source):
-                char = self.source[self.pos]
-                if char.isspace() or char in ";|]":
-                    break
-                if char == "[":
-                    raise self.error("当前版本不支持嵌套括号")
-                self.pos += 1
-            value = self.source[value_start:self.pos]
-            if not value:
-                raise self.error(f"属性 {name} 缺少值", value_start)
+            if self.pos < len(self.source) and self.source[self.pos] == '"':
+                value, value_end = self.parse_quoted_value()
+            else:
+                while self.pos < len(self.source):
+                    char = self.source[self.pos]
+                    if char.isspace() or char in ";|]":
+                        break
+                    if char == "[":
+                        raise self.error("当前版本不支持嵌套括号")
+                    self.pos += 1
+                value = self.source[value_start:self.pos]
+                value_end = self.pos
+                if not value:
+                    raise self.error(f"属性 {name} 缺少值", value_start)
             if name in attrs:
                 raise self.error(f"属性 {name} 重复", key_start)
             attrs[name] = Attr(name, value, value_start)
+            segment_end = value_end
             self.skip_space()
             if self.pos < len(self.source) and self.source[self.pos] == ";":
                 self.pos += 1
+                segment_end = self.pos
                 self.skip_space()
                 if self.pos < len(self.source) and self.source[self.pos] in "|]":
                     break
                 continue
             break
-        return NodeSpec(attrs, segment_start)
+        return NodeSpec(attrs, segment_start, segment_end)
 
 
 def parse(source: str) -> list[Group]:
     return Parser(source).parse()
+
+
+def source_position(source: str, offset: int) -> dict[str, int]:
+    offset = max(0, min(offset, len(source)))
+    previous_newline = source.rfind("\n", 0, offset)
+    return {
+        "offset": offset,
+        "line": source.count("\n", 0, offset) + 1,
+        "column": offset - previous_newline,
+    }
+
+
+def make_source_span(source: str, start: int, end: int, source_path: Optional[str]) -> dict[str, object]:
+    return {
+        "source": source_path,
+        "start": source_position(source, start),
+        "end": source_position(source, end),
+    }
 
 
 
@@ -214,7 +286,7 @@ def outside_status(rect: Rect, canvas: Rect) -> str:
 
 LINUX_DEFAULT_FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 DIMENSION_RE = re.compile(r"^(a|pw|ph|w|h)(-?\d+(?:/\d+)?)$")
-COMMON_ATTRS = {"x", "y", "w", "h", "xo", "yo", "fill"}
+COMMON_ATTRS = {"x", "y", "w", "h", "xo", "yo", "anchor", "fill"}
 TEXT_ATTRS = {"text", "font", "size", "color"}
 IMAGE_ATTRS = {"image"}
 REF_ATTRS = {"ref"}
@@ -239,6 +311,7 @@ class Node:
     png: Optional[bytes] = None
     intrinsic: Optional[tuple[int, int]] = None
     metadata: dict[str, object] = field(default_factory=dict)
+    source_span: dict[str, object] = field(default_factory=dict)
     expansion: list["Node"] = field(default_factory=list)
     children: list["Node"] = field(default_factory=list)
 
@@ -304,8 +377,14 @@ def resolve_default_font(candidates: Optional[tuple[Path, ...]] = None) -> str:
     raise ValueError(f"没有找到默认字体；请用 font=字体文件路径 显式指定。已尝试：{attempted}")
 
 
-def rasterize_text(text: str, font_path: str, size: int, color: str) -> tuple[bytes, tuple[int, int], dict[str, object]]:
-    path = resolve_default_font() if font_path == "default" else font_path
+def rasterize_text(text: str, font_path: str, size: int, color: str, resource_dir: Path) -> tuple[bytes, tuple[int, int], dict[str, object]]:
+    if font_path == "default":
+        path = resolve_default_font()
+    else:
+        font_file = Path(font_path)
+        if not font_file.is_absolute():
+            font_file = resource_dir / font_file
+        path = str(font_file.resolve())
     try:
         font = ImageFont.truetype(path, size=size)
     except OSError as error:
@@ -366,6 +445,19 @@ def validate_common(spec, source: str, kind: str) -> dict[str, object]:
             raise LangError(f"未知属性 {attr.name}，或当前 primitive 类型不允许该属性", source, attr.position)
     fill = validate_color(attrs["fill"], source) if "fill" in attrs else None
     dimensions: dict[str, Dimension] = {}
+    if "anchor" in attrs:
+        anchor = attrs["anchor"]
+        if anchor.value != "center":
+            raise LangError("anchor 当前只接受 center", source, anchor.position)
+        conflicts = {"x", "y", "xo", "yo"} & set(attrs)
+        if conflicts:
+            raise LangError(f"anchor 不能与位置属性同时出现：{sorted(conflicts)}", source, anchor.position)
+        dimensions.update({
+            "x": Dimension("pw", Fraction(1, 2)),
+            "y": Dimension("ph", Fraction(1, 2)),
+            "xo": Dimension("w", Fraction(-1, 2)),
+            "yo": Dimension("h", Fraction(-1, 2)),
+        })
     for name in ("x", "xo"):
         if name in attrs:
             dimensions[name] = parse_dimension(attrs[name], source, {"pw"} if name == "x" else {"pw", "w"})
@@ -389,7 +481,7 @@ def validate_common(spec, source: str, kind: str) -> dict[str, object]:
     return {"fill": fill, "dimensions": dimensions}
 
 
-def evaluate_node(spec, parent, path: str, source: str, context: RefContext) -> Node:
+def _evaluate_node(spec, parent, path: str, source: str, context: RefContext) -> Node:
     context.created_nodes += 1
     if context.created_nodes > MAX_EXPANDED_NODES:
         raise ValueError(f"展开节点数超过上限 {MAX_EXPANDED_NODES}")
@@ -403,6 +495,8 @@ def evaluate_node(spec, parent, path: str, source: str, context: RefContext) -> 
     common = validate_common(spec, source, kind)
     dimensions = common["dimensions"]
     current_dir = context.stack[-1].parent if context.stack else context.resource_dir
+    current_source = str(context.stack[-1]) if context.stack else None
+    source_span = make_source_span(source, spec.position, spec.end, current_source)
 
     text = None
     source_name = None
@@ -410,18 +504,25 @@ def evaluate_node(spec, parent, path: str, source: str, context: RefContext) -> 
     intrinsic = None
     metadata: dict[str, object] = {}
     if kind == "text":
-        if "size" not in spec.attrs:
-            raise LangError("text 要求显式 size", source, spec.position)
-        size_attr = spec.attrs["size"]
-        if not re.fullmatch(r"\d+", size_attr.value) or int(size_attr.value) <= 0:
-            raise LangError("size 必须是正整数像素", source, size_attr.position)
+        size = 40
+        if "size" in spec.attrs:
+            size_attr = spec.attrs["size"]
+            if not re.fullmatch(r"\d+", size_attr.value) or int(size_attr.value) <= 0:
+                raise LangError("size 必须是正整数像素", source, size_attr.position)
+            size = int(size_attr.value)
         foreground = validate_color(spec.attrs["color"], source) if "color" in spec.attrs else "#000000"
         font_path = spec.attrs["font"].value if "font" in spec.attrs else "default"
         text = spec.attrs["text"].value
-        png, intrinsic, metadata = rasterize_text(text, font_path, int(size_attr.value), foreground)
+        try:
+            png, intrinsic, metadata = rasterize_text(text, font_path, size, foreground, current_dir)
+        except ValueError as error:
+            raise EvaluationError(str(error), source_span, path) from error
     elif kind == "image":
         source_name = spec.attrs["image"].value
-        png, intrinsic, metadata, source_name = load_image(source_name, current_dir)
+        try:
+            png, intrinsic, metadata, source_name = load_image(source_name, current_dir)
+        except ValueError as error:
+            raise EvaluationError(str(error), source_span, path) from error
 
     def basis(dimension: Dimension, own_w: Fraction, own_h: Fraction) -> Fraction:
         if dimension.unit == "pw":
@@ -450,11 +551,11 @@ def evaluate_node(spec, parent, path: str, source: str, context: RefContext) -> 
     x = parent.x + displacement("x") + displacement("xo")
     y = parent.y + displacement("y") + displacement("yo")
     rect = Rect(x, y, width, height)
-    node = Node(rect=rect, path=path, fill=common["fill"], kind=kind, text=text, source=source_name, png=png, intrinsic=intrinsic, metadata=metadata)
+    node = Node(rect=rect, path=path, fill=common["fill"], kind=kind, text=text, source=source_name, png=png, intrinsic=intrinsic, metadata=metadata, source_span=source_span)
     if kind == "ref":
         ref_name = spec.attrs["ref"].value
-        if not ref_name or ref_name in {".", ".."} or "/" in ref_name or "\\" in ref_name or ref_name.endswith(".txt"):
-            raise LangError("ref 只接受不带路径和 .txt 后缀的定义名", source, spec.attrs["ref"].position)
+        if not ref_name or ref_name in {".", ".."} or "/" in ref_name or "\\" in ref_name or "@" in ref_name or ref_name.endswith(".txt"):
+            raise LangError("ref 只接受不带路径、@ 和 .txt 后缀的定义名", source, spec.attrs["ref"].position)
         target = (current_dir / f"{ref_name}.txt").resolve()
         if target in context.stack:
             chain = " → ".join(path.name for path in [*context.stack, target])
@@ -465,8 +566,13 @@ def evaluate_node(spec, parent, path: str, source: str, context: RefContext) -> 
             try:
                 definition_source = target.read_text(encoding="utf-8")
             except OSError as error:
-                raise ValueError(f"无法读取 ref 定义 {str(target)!r}：{error}") from error
-            context.cache[target] = (definition_source, parse(definition_source))
+                raise EvaluationError(f"无法读取 ref 定义 {str(target)!r}：{error}", source_span, path) from error
+            try:
+                groups = parse(definition_source)
+            except LangError as error:
+                error.source_path = str(target)
+                raise
+            context.cache[target] = (definition_source, groups)
         definition_source, groups = context.cache[target]
         context.stack.append(target)
         try:
@@ -476,6 +582,15 @@ def evaluate_node(spec, parent, path: str, source: str, context: RefContext) -> 
         node.source = str(target)
         node.metadata = {"ref_path": str(target), "expanded_roots": len(node.expansion)}
     return node
+
+
+def evaluate_node(spec, parent, path: str, source: str, context: RefContext) -> Node:
+    try:
+        return _evaluate_node(spec, parent, path, source, context)
+    except LangError as error:
+        if error.source_path is None and context.stack:
+            error.source_path = str(context.stack[-1])
+        raise
 
 
 def evaluate_groups(groups: list[Group], parent: Rect, prefix: str, source: str, context: RefContext) -> list[Node]:
@@ -509,14 +624,20 @@ def build_scene(source: str, width: int = 1200, height: int = 1200, resource_dir
     stack = [source_path.resolve()] if source_path is not None else []
     context = RefContext(resource_dir=resource_dir, stack=stack)
     canvas = Rect(Fraction(0), Fraction(0), Fraction(width), Fraction(height))
-    roots = evaluate_groups(parse(source), canvas, "", source, context)
+    try:
+        groups = parse(source)
+    except LangError as error:
+        if source_path is not None:
+            error.source_path = str(source_path.resolve())
+        raise
+    roots = evaluate_groups(groups, canvas, "", source, context)
     return Scene(width, height, roots, flatten(roots))
 
 
 def render_svg(scene: Scene) -> str:
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{scene.width}" height="{scene.height}" viewBox="0 0 {scene.width} {scene.height}">',
-        "  <!-- Layerlang v0.2: deterministic layers; content is scaled without preserving aspect ratio. -->",
+        "  <!-- Layerlang v0.3: deterministic layers; content is scaled without preserving aspect ratio. -->",
     ]
     for index, node in enumerate(scene.layers):
         rect = node.rect
@@ -549,6 +670,12 @@ def scene_report(scene: Scene, hit_point: Optional[tuple[str, str]] = None) -> d
         status = outside_status(node.rect, scene.canvas_rect)
         if status != "inside":
             outside[status].append(node.path)
+        scale = None
+        if node.intrinsic:
+            scale = [
+                number(node.rect.w / Fraction(node.intrinsic[0])),
+                number(node.rect.h / Fraction(node.intrinsic[1])),
+            ]
         layers.append({
             "index": index,
             "path": node.path,
@@ -558,6 +685,8 @@ def scene_report(scene: Scene, hit_point: Optional[tuple[str, str]] = None) -> d
             "source": node.source,
             "intrinsic": list(node.intrinsic) if node.intrinsic else None,
             "content_metadata": node.metadata or None,
+            "source_span": node.source_span,
+            "scale": scale,
             "rect_px": {key: number(value) for key, value in {
                 "x": node.rect.x, "y": node.rect.y, "w": node.rect.w, "h": node.rect.h,
             }.items()},
@@ -725,13 +854,17 @@ class TextTests(unittest.TestCase):
         with self.assertRaisesRegex(LangError, "不允许单位 a"):
             build_scene("[w=a100;h=ph100]")
 
-    def test_rejects_zero_negative_and_missing_size(self) -> None:
+    def test_default_size_is_forty_pixels(self) -> None:
+        node = build_scene("[text=测试]").layers[0]
+        self.assertEqual(node.metadata["size_px"], 40)
+
+    def test_rejects_zero_and_negative_size(self) -> None:
         with self.assertRaisesRegex(LangError, "必须大于零"):
             build_scene("[text=测试;size=40;w=a0]")
         with self.assertRaisesRegex(LangError, "必须大于零"):
             build_scene("[text=测试;size=40;w=a-50]")
-        with self.assertRaisesRegex(LangError, "显式 size"):
-            build_scene("[text=测试]")
+        with self.assertRaisesRegex(LangError, "正整数"):
+            build_scene("[text=测试;size=0]")
 
     def test_rejects_spaces_in_literals(self) -> None:
         with self.assertRaises(LangError):
@@ -759,6 +892,51 @@ class FontTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "font=字体文件路径"):
                 resolve_default_font((missing,))
+
+    def test_explicit_font_is_relative_to_definition_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            copied = directory / "Noto Sans Test.ttf"
+            copied.write_bytes(Path(resolve_default_font()).read_bytes())
+            node = build_scene(
+                '[text=测试;font="Noto Sans Test.ttf"]',
+                resource_dir=directory,
+            ).layers[0]
+            self.assertEqual(node.metadata["font_path"], str(copied.resolve()))
+
+
+class QuoteTests(unittest.TestCase):
+    def test_quoted_text_allows_spaces_delimiters_and_brackets(self) -> None:
+        node = build_scene('[text="hello world;|[draft]"]').layers[0]
+        self.assertEqual(node.text, "hello world;|[draft]")
+
+    def test_quoted_escapes_are_decoded_once(self) -> None:
+        node = build_scene(r'[text="say \"hi\" \\ ok"]').layers[0]
+        self.assertEqual(node.text, 'say "hi" \\ ok')
+        plain = build_scene('[text=abc"def]').layers[0]
+        self.assertEqual(plain.text, 'abc"def')
+
+    def test_quoted_resource_path_can_contain_spaces(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            Image.new("RGBA", (3, 2), (255, 0, 0, 255)).save(directory / "pixel red.png")
+            node = build_scene('[image="pixel red.png"]', resource_dir=directory).layers[0]
+            self.assertEqual(node.intrinsic, (3, 2))
+
+    def test_unclosed_quote_reports_opening_line_and_column(self) -> None:
+        with self.assertRaises(LangError) as caught:
+            build_scene('\n[text="hello]')
+        self.assertEqual(caught.exception.line, 2)
+        self.assertEqual(caught.exception.column, 7)
+        self.assertIn("未闭合", caught.exception.message)
+
+    def test_invalid_escape_trailing_text_and_raw_newline_are_rejected(self) -> None:
+        with self.assertRaisesRegex(LangError, "两种转义"):
+            build_scene(r'[text="bad\q";size=40]')
+        with self.assertRaisesRegex(LangError, "闭合引号后"):
+            build_scene('[text="ok"tail;size=40]')
+        with self.assertRaisesRegex(LangError, "原始换行"):
+            build_scene('[text="two\nlines"]')
 
 
 class ImageTests(unittest.TestCase):
@@ -889,6 +1067,8 @@ class RefTests(unittest.TestCase):
             self.build("[w=pw100;ref=card;h=ph100]")
         with self.assertRaisesRegex(LangError, "定义名"):
             self.build("[ref=../card;w=pw100;h=ph100]")
+        with self.assertRaisesRegex(LangError, "定义名"):
+            self.build("[ref=a@b;w=pw100;h=ph100]")
 
     def test_depth_guard(self) -> None:
         global MAX_REF_DEPTH
@@ -913,8 +1093,82 @@ class RefTests(unittest.TestCase):
             MAX_EXPANDED_NODES = original
 
 
+class AnchorTests(unittest.TestCase):
+    def test_center_anchor_matches_explicit_four_attributes(self) -> None:
+        explicit = build_scene("[text=hello;x=pw1/2;y=ph1/2;xo=w-1/2;yo=h-1/2]")
+        sugared = build_scene("[text=hello;anchor=center]")
+        self.assertEqual(sugared.layers[0].rect, explicit.layers[0].rect)
+        self.assertEqual(render_svg(sugared), render_svg(explicit))
+
+    def test_invalid_anchor_and_position_conflicts_are_rejected(self) -> None:
+        with self.assertRaisesRegex(LangError, "只接受 center"):
+            build_scene("[text=hello;anchor=middle]")
+        with self.assertRaisesRegex(LangError, "不能与位置属性"):
+            build_scene("[text=hello;anchor=center;xo=w10]")
+
+
+class ReportTests(unittest.TestCase):
+    def test_source_spans_point_to_main_and_ref_definitions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            main = directory / "main.txt"
+            source = '[text="hello world";anchor=center]'
+            main.write_text(source, encoding="utf-8")
+            report = scene_report(build_scene(source, source_path=main))
+            span = report["layers"][0]["source_span"]
+            self.assertEqual(span["source"], str(main.resolve()))
+            self.assertEqual(span["start"], {"offset": 1, "line": 1, "column": 2})
+            self.assertEqual(span["end"]["offset"], len(source) - 1)
+
+            card_source = '[w=pw100;h=ph100|text="组件"]'
+            card = directory / "card.txt"
+            card.write_text(card_source, encoding="utf-8")
+            main_source = "[ref=card;w=pw1/2;h=ph100][ref=card;x=pw1/2;w=pw1/2;h=ph100]"
+            main.write_text(main_source, encoding="utf-8")
+            ref_report = scene_report(build_scene(main_source, source_path=main))
+            internal = ref_report["layers"][2]
+            repeated = ref_report["layers"][5]
+            self.assertEqual(internal["path"], "0@card/0/0")
+            self.assertEqual(repeated["path"], "1@card/0/0")
+            self.assertEqual(internal["source_span"], repeated["source_span"])
+            self.assertEqual(internal["source_span"]["source"], str(card.resolve()))
+            self.assertEqual(
+                internal["source_span"]["start"]["offset"],
+                card_source.index("text"),
+            )
+
+    def test_scale_reports_natural_uniform_and_nonuniform_states(self) -> None:
+        report = scene_report(build_scene(
+            "[text=测试][text=测试;w=a50;h=a50]"
+            "[text=测试;w=a50;h=a100][w=pw100;h=ph100]"
+        ))
+        self.assertEqual(report["layers"][0]["scale"], [1, 1])
+        self.assertEqual(report["layers"][1]["scale"], [0.5, 0.5])
+        self.assertEqual(report["layers"][2]["scale"], [0.5, 1])
+        self.assertIsNone(report["layers"][3]["scale"])
+
+
+class ErrorContextTests(unittest.TestCase):
+    def test_nested_resource_error_contains_file_span_and_node_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            card = directory / "card.txt"
+            card.write_text("[text=测试;font=missing.ttf]", encoding="utf-8")
+            main = directory / "main.txt"
+            source = "[ref=card;w=pw100;h=ph100]"
+            main.write_text(source, encoding="utf-8")
+            with self.assertRaises(EvaluationError) as caught:
+                build_scene(source, source_path=main)
+            error = caught.exception
+            self.assertEqual(error.node_path, "0@card/0")
+            self.assertEqual(error.source_span["source"], str(card.resolve()))
+            self.assertIn("0@card/0", str(error))
+            self.assertIn("card.txt", str(error))
+            self.assertIn("第 1 行", str(error))
+
+
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Layerlang v0.2 渲染器")
+    parser = argparse.ArgumentParser(description="Layerlang v0.3 渲染器")
     subparsers = parser.add_subparsers(dest="command", required=True)
     render_parser = subparsers.add_parser("render")
     render_parser.add_argument("input")
@@ -931,8 +1185,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             loader.loadTestsFromTestCase(RectTests),
             loader.loadTestsFromTestCase(TextTests),
             loader.loadTestsFromTestCase(FontTests),
+            loader.loadTestsFromTestCase(QuoteTests),
             loader.loadTestsFromTestCase(ImageTests),
             loader.loadTestsFromTestCase(RefTests),
+            loader.loadTestsFromTestCase(AnchorTests),
+            loader.loadTestsFromTestCase(ReportTests),
+            loader.loadTestsFromTestCase(ErrorContextTests),
         ])
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         return 0 if result.wasSuccessful() else 1
