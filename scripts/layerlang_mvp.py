@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Layerlang v0.3：矩形、文字、本地图片、本地引用与可溯源图层检查。
+"""Layerlang v0.4：矩形、文字、本地图片、本地引用与可溯源图层检查。
 
 依赖：Python 标准库与 Pillow。
   python3 layerlang_mvp.py self-test
@@ -31,7 +31,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-SPEC_VERSION = "0.3"
+SPEC_VERSION = "0.4"
 HERE = Path(__file__).resolve().parent
 
 
@@ -68,16 +68,16 @@ class LangError(Exception):
 
 
 class EvaluationError(ValueError):
-    def __init__(self, message: str, source_span: dict[str, object], node_path: str):
+    def __init__(self, message: str, code: dict[str, object], node_path: str):
         self.message = message
-        self.source_span = source_span
+        self.code = code
         self.node_path = node_path
         super().__init__(str(self))
 
     def __str__(self) -> str:
-        start = self.source_span["start"]
+        start = self.code["start"]
         assert isinstance(start, dict)
-        source = self.source_span["source"] or "<memory>"
+        source = self.code["file"] or "<memory>"
         return f"{source}：第 {start['line']} 行，第 {start['column']} 列（节点 {self.node_path}）：{self.message}"
 
 
@@ -262,9 +262,9 @@ def read_source_text(path: Path) -> str:
         return opened.read()
 
 
-def make_source_span(source: str, start: int, end: int, source_path: Optional[str]) -> dict[str, object]:
+def make_code_location(source: str, start: int, end: int, source_path: Optional[str]) -> dict[str, object]:
     return {
-        "source": source_path,
+        "file": source_path,
         "start": source_position(source, start),
         "end": source_position(source, end),
     }
@@ -319,6 +319,41 @@ class Dimension:
     scale: Fraction
 
 
+ANCHOR_ALIASES = {
+    "left": "null-left",
+    "right": "null-right",
+    "top": "top-null",
+    "bottom": "bottom-null",
+    "center": "center-center",
+}
+
+
+def desugar_anchor(value: str) -> dict[str, Dimension]:
+    """把固定 anchor 糖展开为后端位置属性，不读取任何场景状态。"""
+    value = ANCHOR_ALIASES.get(value, value)
+    parts = value.split("-")
+    if len(parts) != 2:
+        raise ValueError(f"非法 anchor {value!r}；应为 vertical-horizontal 或受支持的短形式")
+    vertical, horizontal = parts
+    if vertical not in {"null", "top", "center", "bottom"} or horizontal not in {"null", "left", "center", "right"}:
+        raise ValueError(f"非法 anchor {value!r}；垂直轴为 null/top/center/bottom，水平轴为 null/left/center/right")
+
+    dimensions: dict[str, Dimension] = {}
+    if horizontal == "left":
+        dimensions.update(x=Dimension("pw", Fraction(0)), xo=Dimension("w", Fraction(0)))
+    elif horizontal == "center":
+        dimensions.update(x=Dimension("pw", Fraction(1, 2)), xo=Dimension("w", Fraction(-1, 2)))
+    elif horizontal == "right":
+        dimensions.update(x=Dimension("pw", Fraction(1)), xo=Dimension("w", Fraction(-1)))
+    if vertical == "top":
+        dimensions.update(y=Dimension("ph", Fraction(0)), yo=Dimension("h", Fraction(0)))
+    elif vertical == "center":
+        dimensions.update(y=Dimension("ph", Fraction(1, 2)), yo=Dimension("h", Fraction(-1, 2)))
+    elif vertical == "bottom":
+        dimensions.update(y=Dimension("ph", Fraction(1)), yo=Dimension("h", Fraction(-1)))
+    return dimensions
+
+
 @dataclass
 class Node:
     rect: object
@@ -326,11 +361,11 @@ class Node:
     fill: Optional[str]
     kind: str
     text: Optional[str] = None
-    source: Optional[str] = None
+    resource: Optional[str] = None
     png: Optional[bytes] = None
     intrinsic: Optional[tuple[int, int]] = None
     metadata: dict[str, object] = field(default_factory=dict)
-    source_span: dict[str, object] = field(default_factory=dict)
+    code: dict[str, object] = field(default_factory=dict)
     expansion: list["Node"] = field(default_factory=list)
     children: list["Node"] = field(default_factory=list)
 
@@ -468,17 +503,14 @@ def validate_common(spec, source: str, kind: str) -> dict[str, object]:
     dimensions: dict[str, Dimension] = {}
     if "anchor" in attrs:
         anchor = attrs["anchor"]
-        if anchor.value != "center":
-            raise LangError("anchor 当前只接受 center", source, anchor.position)
-        conflicts = {"x", "y", "xo", "yo"} & set(attrs)
+        try:
+            expanded = desugar_anchor(anchor.value)
+        except ValueError as error:
+            raise LangError(str(error), source, anchor.position) from error
+        conflicts = set(expanded) & set(attrs)
         if conflicts:
-            raise LangError(f"anchor 不能与位置属性同时出现：{sorted(conflicts)}", source, anchor.position)
-        dimensions.update({
-            "x": Dimension("pw", Fraction(1, 2)),
-            "y": Dimension("ph", Fraction(1, 2)),
-            "xo": Dimension("w", Fraction(-1, 2)),
-            "yo": Dimension("h", Fraction(-1, 2)),
-        })
+            raise LangError(f"anchor 展开属性与手写属性冲突：{sorted(conflicts)}", source, anchor.position)
+        dimensions.update(expanded)
     for name in ("x", "xo"):
         if name in attrs:
             dimensions[name] = parse_dimension(attrs[name], source, {"pw"} if name == "x" else {"pw", "w"})
@@ -517,7 +549,7 @@ def _evaluate_node(spec, parent, path: str, source: str, context: RefContext) ->
     dimensions = common["dimensions"]
     current_dir = context.stack[-1].parent if context.stack else context.resource_dir
     current_source = str(context.stack[-1]) if context.stack else None
-    source_span = make_source_span(source, spec.position, spec.end, current_source)
+    code = make_code_location(source, spec.position, spec.end, current_source)
 
     text = None
     source_name = None
@@ -537,13 +569,13 @@ def _evaluate_node(spec, parent, path: str, source: str, context: RefContext) ->
         try:
             png, intrinsic, metadata = rasterize_text(text, font_path, size, foreground, current_dir)
         except ValueError as error:
-            raise EvaluationError(str(error), source_span, path) from error
+            raise EvaluationError(str(error), code, path) from error
     elif kind == "image":
         source_name = spec.attrs["image"].value
         try:
             png, intrinsic, metadata, source_name = load_image(source_name, current_dir)
         except ValueError as error:
-            raise EvaluationError(str(error), source_span, path) from error
+            raise EvaluationError(str(error), code, path) from error
 
     def basis(dimension: Dimension, own_w: Fraction, own_h: Fraction) -> Fraction:
         if dimension.unit == "pw":
@@ -572,7 +604,7 @@ def _evaluate_node(spec, parent, path: str, source: str, context: RefContext) ->
     x = parent.x + displacement("x") + displacement("xo")
     y = parent.y + displacement("y") + displacement("yo")
     rect = Rect(x, y, width, height)
-    node = Node(rect=rect, path=path, fill=common["fill"], kind=kind, text=text, source=source_name, png=png, intrinsic=intrinsic, metadata=metadata, source_span=source_span)
+    node = Node(rect=rect, path=path, fill=common["fill"], kind=kind, text=text, resource=source_name, png=png, intrinsic=intrinsic, metadata=metadata, code=code)
     if kind == "ref":
         ref_name = spec.attrs["ref"].value
         if not ref_name or ref_name in {".", ".."} or "/" in ref_name or "\\" in ref_name or "@" in ref_name or ref_name.endswith(".txt"):
@@ -587,7 +619,7 @@ def _evaluate_node(spec, parent, path: str, source: str, context: RefContext) ->
             try:
                 definition_source = read_source_text(target)
             except OSError as error:
-                raise EvaluationError(f"无法读取 ref 定义 {str(target)!r}：{error}", source_span, path) from error
+                raise EvaluationError(f"无法读取 ref 定义 {str(target)!r}：{error}", code, path) from error
             try:
                 groups = parse(definition_source)
             except LangError as error:
@@ -600,7 +632,7 @@ def _evaluate_node(spec, parent, path: str, source: str, context: RefContext) ->
             node.expansion = evaluate_groups(groups, rect, f"{path}@{ref_name}", definition_source, context)
         finally:
             context.stack.pop()
-        node.source = str(target)
+        node.resource = str(target)
         node.metadata = {"ref_path": str(target), "expanded_roots": len(node.expansion)}
     return node
 
@@ -658,7 +690,7 @@ def build_scene(source: str, width: int = 1200, height: int = 1200, resource_dir
 def render_svg(scene: Scene) -> str:
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{scene.width}" height="{scene.height}" viewBox="0 0 {scene.width} {scene.height}">',
-        "  <!-- Layerlang v0.3: deterministic layers; content is scaled without preserving aspect ratio. -->",
+        "  <!-- Layerlang v0.4: deterministic layers; content is scaled without preserving aspect ratio. -->",
     ]
     for index, node in enumerate(scene.layers):
         rect = node.rect
@@ -703,10 +735,10 @@ def scene_report(scene: Scene, hit_point: Optional[tuple[str, str]] = None) -> d
             "kind": node.kind,
             "fill": node.fill,
             "text": node.text,
-            "source": node.source,
+            "resource": node.resource,
             "intrinsic": list(node.intrinsic) if node.intrinsic else None,
             "content_metadata": node.metadata or None,
-            "source_span": node.source_span,
+            "code": node.code,
             "scale": scale,
             "rect_px": {key: number(value) for key, value in {
                 "x": node.rect.x, "y": node.rect.y, "w": node.rect.w, "h": node.rect.h,
@@ -1128,29 +1160,93 @@ class RefTests(unittest.TestCase):
 
 
 class AnchorTests(unittest.TestCase):
-    def test_center_anchor_matches_explicit_four_attributes(self) -> None:
-        explicit = build_scene("[text=hello;x=pw1/2;y=ph1/2;xo=w-1/2;yo=h-1/2]")
-        sugared = build_scene("[text=hello;anchor=center]")
-        self.assertEqual(sugared.layers[0].rect, explicit.layers[0].rect)
-        self.assertEqual(render_svg(sugared), render_svg(explicit))
+    def test_all_sixteen_composites_produce_the_expected_rectangles(self) -> None:
+        horizontal_x = {"null": 0, "left": 0, "center": 450, "right": 900}
+        vertical_y = {"null": 0, "top": 0, "center": 450, "bottom": 900}
+        for vertical in vertical_y:
+            for horizontal in horizontal_x:
+                value = f"{vertical}-{horizontal}"
+                with self.subTest(anchor=value):
+                    node = build_scene(f"[w=pw1/4;h=ph1/4;anchor={value}]").layers[0]
+                    self.assertEqual(
+                        node.rect,
+                        Rect(
+                            Fraction(horizontal_x[horizontal]),
+                            Fraction(vertical_y[vertical]),
+                            Fraction(300),
+                            Fraction(300),
+                        ),
+                    )
 
-    def test_invalid_anchor_and_position_conflicts_are_rejected(self) -> None:
-        with self.assertRaisesRegex(LangError, "只接受 center"):
-            build_scene("[text=hello;anchor=middle]")
-        with self.assertRaisesRegex(LangError, "不能与位置属性"):
-            build_scene("[text=hello;anchor=center;xo=w10]")
+    def test_short_aliases_match_their_full_forms(self) -> None:
+        aliases = {
+            "left": "null-left",
+            "right": "null-right",
+            "top": "top-null",
+            "bottom": "bottom-null",
+            "center": "center-center",
+        }
+        for short, full in aliases.items():
+            with self.subTest(anchor=short):
+                sugared = build_scene(f"[text=hello;anchor={short}]")
+                explicit = build_scene(f"[text=hello;anchor={full}]")
+                self.assertEqual(render_svg(sugared), render_svg(explicit))
+
+    def test_unoccupied_axes_accept_manual_attributes_in_any_order(self) -> None:
+        equivalent_sources = [
+            "[w=pw1/4;h=ph1/4;anchor=right;y=ph1/2;yo=h-1/2]",
+            "[y=ph1/2;anchor=right;yo=h-1/2;w=pw1/4;h=ph1/4]",
+            "[w=pw1/4;h=ph1/4;anchor=center-right]",
+        ]
+        scenes = [build_scene(source) for source in equivalent_sources]
+        self.assertEqual(render_svg(scenes[0]), render_svg(scenes[1]))
+        self.assertEqual(render_svg(scenes[0]), render_svg(scenes[2]))
+
+        horizontal_center = build_scene("[w=pw1/4;h=ph1/4;anchor=null-center;y=ph100;yo=h-100]")
+        vertical_center = build_scene("[w=pw1/4;h=ph1/4;anchor=center-null;x=pw100;xo=w-100]")
+        self.assertEqual(horizontal_center.layers[0].rect, Rect(Fraction(450), Fraction(900), Fraction(300), Fraction(300)))
+        self.assertEqual(vertical_center.layers[0].rect, Rect(Fraction(900), Fraction(450), Fraction(300), Fraction(300)))
+
+        manual = "[w=pw1/4;h=ph1/4;x=pw1/4;y=ph1/4;xo=w10;yo=h10]"
+        noop = "[w=pw1/4;h=ph1/4;anchor=null-null;x=pw1/4;y=ph1/4;xo=w10;yo=h10]"
+        self.assertEqual(render_svg(build_scene(manual)), render_svg(build_scene(noop)))
+
+    def test_conflicts_follow_all_expanded_keys_including_zero_axes(self) -> None:
+        invalid_sources = [
+            "[w=pw100;h=ph100;anchor=right;x=pw1/2]",
+            "[w=pw100;h=ph100;anchor=right;xo=w10]",
+            "[w=pw100;h=ph100;anchor=top;y=ph1/2]",
+            "[w=pw100;h=ph100;anchor=top;yo=h10]",
+            "[w=pw100;h=ph100;anchor=left;x=pw0]",
+            "[w=pw100;h=ph100;anchor=top-right;y=ph1/2]",
+            "[w=pw100;h=ph100;anchor=null-center;x=pw1/2]",
+            "[w=pw100;h=ph100;anchor=center-null;y=ph1/2]",
+            "[text=hello;anchor=center;xo=w10]",
+        ]
+        for source in invalid_sources:
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(LangError, "冲突"):
+                    build_scene(source)
+
+    def test_invalid_and_duplicate_anchors_are_rejected(self) -> None:
+        for value in ("middle", "left-top", "right-center", "null", "center-left-right"):
+            with self.subTest(anchor=value):
+                with self.assertRaisesRegex(LangError, "非法 anchor"):
+                    build_scene(f"[text=hello;anchor={value}]")
+        with self.assertRaisesRegex(LangError, "重复"):
+            build_scene("[text=hello;anchor=center;anchor=right]")
 
 
 class ReportTests(unittest.TestCase):
-    def test_source_spans_point_to_main_and_ref_definitions(self) -> None:
+    def test_code_locations_point_to_main_and_ref_definitions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             main = directory / "main.txt"
             source = '[text="hello world";anchor=center]'
             main.write_text(source, encoding="utf-8")
             report = scene_report(build_scene(source, source_path=main))
-            span = report["layers"][0]["source_span"]
-            self.assertEqual(span["source"], str(main.resolve()))
+            span = report["layers"][0]["code"]
+            self.assertEqual(span["file"], str(main.resolve()))
             self.assertEqual(span["start"], {"offset": 1, "line": 1, "column": 2})
             self.assertEqual(span["end"]["offset"], len(source) - 1)
 
@@ -1164,12 +1260,40 @@ class ReportTests(unittest.TestCase):
             repeated = ref_report["layers"][5]
             self.assertEqual(internal["path"], "0@card/0/0")
             self.assertEqual(repeated["path"], "1@card/0/0")
-            self.assertEqual(internal["source_span"], repeated["source_span"])
-            self.assertEqual(internal["source_span"]["source"], str(card.resolve()))
+            self.assertEqual(ref_report["layers"][0]["resource"], str(card.resolve()))
+            self.assertEqual(ref_report["layers"][3]["resource"], str(card.resolve()))
+            self.assertIsNone(internal["resource"])
+            self.assertEqual(internal["code"], repeated["code"])
+            self.assertEqual(internal["code"]["file"], str(card.resolve()))
             self.assertEqual(
-                internal["source_span"]["start"]["offset"],
+                internal["code"]["start"]["offset"],
                 card_source.index("text"),
             )
+
+    def test_resource_and_code_schema_covers_image_text_rect_and_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            pixel = directory / "pixel.png"
+            Image.new("RGBA", (2, 3), (255, 0, 0, 255)).save(pixel)
+            main = directory / "main.txt"
+            source = "[image=pixel.png][text=测试][w=pw100;h=ph100]"
+            main.write_text(source, encoding="utf-8")
+            report = scene_report(build_scene(source, resource_dir=directory, source_path=main))
+            image_layer, text_layer, rect_layer = report["layers"]
+            self.assertEqual(image_layer["resource"], str(pixel.resolve()))
+            self.assertEqual(image_layer["content_metadata"]["source_path"], str(pixel.resolve()))
+            self.assertIsNone(text_layer["resource"])
+            self.assertIn("font_path", text_layer["content_metadata"])
+            self.assertIsNone(rect_layer["resource"])
+            for layer in report["layers"]:
+                self.assertNotIn("source", layer)
+                self.assertNotIn("source_span", layer)
+                self.assertEqual(layer["code"]["file"], str(main.resolve()))
+
+            memory_layer = scene_report(build_scene("[w=pw100;h=ph100]"))["layers"][0]
+            self.assertIsNone(memory_layer["resource"])
+            self.assertIsNone(memory_layer["code"]["file"])
+            self.assertIn("offset", memory_layer["code"]["start"])
 
     def test_scale_reports_natural_uniform_and_nonuniform_states(self) -> None:
         report = scene_report(build_scene(
@@ -1181,7 +1305,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["layers"][2]["scale"], [0.5, 1])
         self.assertIsNone(report["layers"][3]["scale"])
 
-    def test_crlf_source_span_offsets_slice_original_main_and_ref_text(self) -> None:
+    def test_crlf_code_offsets_slice_original_main_and_ref_text(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             main = directory / "main.txt"
@@ -1222,8 +1346,8 @@ class ReportTests(unittest.TestCase):
             ]
             for layer, (source_path, source_fragment) in zip(report["layers"], expected):
                 with self.subTest(path=layer["path"]):
-                    span = layer["source_span"]
-                    self.assertEqual(span["source"], str(source_path.resolve()))
+                    span = layer["code"]
+                    self.assertEqual(span["file"], str(source_path.resolve()))
                     with source_path.open("r", encoding="utf-8", newline="") as opened:
                         raw_source = opened.read()
                     self.assertEqual(
@@ -1277,7 +1401,7 @@ class CliTests(unittest.TestCase):
 
 
 class ErrorContextTests(unittest.TestCase):
-    def test_nested_resource_error_contains_file_span_and_node_path(self) -> None:
+    def test_nested_resource_error_contains_code_location_and_node_path(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             card = directory / "card.txt"
@@ -1289,7 +1413,7 @@ class ErrorContextTests(unittest.TestCase):
                 build_scene(source, source_path=main)
             error = caught.exception
             self.assertEqual(error.node_path, "0@card/0")
-            self.assertEqual(error.source_span["source"], str(card.resolve()))
+            self.assertEqual(error.code["file"], str(card.resolve()))
             self.assertIn("0@card/0", str(error))
             self.assertIn("card.txt", str(error))
             self.assertIn("第 1 行", str(error))
@@ -1300,7 +1424,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Layerlang v0.3 渲染器")
+    parser = argparse.ArgumentParser(description="Layerlang v0.4 渲染器")
     subparsers = parser.add_subparsers(dest="command", required=True)
     render_parser = subparsers.add_parser("render")
     render_parser.add_argument("input")

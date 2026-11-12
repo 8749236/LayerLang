@@ -1,15 +1,15 @@
 ---
 name: layerlang-mvp
-description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.3 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, center anchoring, and source-mapped inspection reports. Use when the user mentions 图层语言、Layerlang、pw/ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, parameterized refs, cross-layer property access, absolute-pixel geometry, or photorealistic artwork; those are outside v0.3.
+description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.4 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, and resource/code inspection reports. Use when the user mentions 图层语言、Layerlang、pw/ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, parameterized refs, cross-layer property access, absolute-pixel geometry, user-defined sugar, or photorealistic artwork; those are outside v0.4.
 ---
 
-# Layerlang v0.3
+# Layerlang v0.4
 
-使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。把语言规范视为语义权威，把本文件只视为使用流程。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。当前实现修订为 v0.3.1，语言文法和报告 schema 仍为 v0.3。
+使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。把语言规范视为语义权威，把本文件只视为使用流程。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.4 使用按轴 anchor desugar，并以 `resource/code` 报告替代旧 `source/source_span`。
 
 ## 准备
 
-1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_3.md](references/layerlang_v0_3.md)。
+1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_4.md](references/layerlang_v0_4.md)。
 2. 使用 [scripts/layerlang_mvp.py](scripts/layerlang_mvp.py)，不要为每次任务重新实现解析器。
 3. 确保 Python 环境具有 Pillow；文字和图片会统一转换为内嵌 PNG。
 4. 只使用当前规范，不要把“已废弃方案”或“未来脑洞”当成可用语法。
@@ -58,14 +58,14 @@ description: Generate, edit, render, and inspect deterministic SVG graphics with
 
 ## 常用对齐与比例
 
-右对齐和底对齐不需要新的 anchor，直接使用当前节点的最终尺寸：
+右对齐和底对齐使用单轴 anchor：
 
 ```text
-右边：x=pw100;xo=w-100
-底边：y=ph100;yo=h-100
+右边：anchor=right
+底边：anchor=bottom
 ```
 
-它们相对父矩形的右边或底边，对齐的是 layer 矩形边缘；文字位图的字体度量不保证视觉墨迹也贴边。
+它们分别等价于 `x=pw100;xo=w-100` 与 `y=ph100;yo=h-100`，只占用对应轴，另一轴仍可手写。对齐相对父矩形，目标是 layer 矩形边缘；文字位图的字体度量不保证视觉墨迹也贴边。
 
 整数 `N` 表示 `N/100`，分数 `a/b` 直接表示 `a/b`，不要混淆：
 
@@ -79,13 +79,47 @@ pw1/40 = 1/40  = 2.5%
 
 ## 使用 anchor
 
-`anchor=center` 严格等价于：
+anchor 只是纯 desugar，不是自动布局。双轴值按 `vertical-horizontal` 书写：
 
 ```text
-x=pw1/2;y=ph1/2;xo=w-1/2;yo=h-1/2
+vertical   = null | top  | center | bottom
+horizontal = null | left | center | right
 ```
 
-它适用于所有 primitive，但不能与 `x、y、xo、yo` 中任何一个同时出现。`anchor=center;xo=w10` 是错误输入，不表示居中后偏移。
+非 null 值的展开规则：
+
+```text
+left   → x=pw0;xo=w0
+center → x=pw1/2;xo=w-1/2       （水平）
+right  → x=pw100;xo=w-100
+
+top    → y=ph0;yo=h0
+center → y=ph1/2;yo=h-1/2       （垂直）
+bottom → y=ph100;yo=h-100
+```
+
+`null` 表示不管这根轴，不生成属性，也不占用它；`top/left` 虽然展开为零，仍占用对应轴。`null-null` 是什么都不做的完整形式，日常通常直接省略 anchor。
+
+短形式：
+
+```text
+left=null-left；right=null-right；top=top-null；bottom=bottom-null
+center=center-center
+```
+
+推荐写法：双轴定位用 `top-right`，单边靠齐用 `right/bottom`，单边居中用 `null-center/center-null`，双轴居中用 `center`。
+
+冲突由展开 key 决定。被 anchor 占用的属性不能再手写，另一根 null 轴可以：
+
+```text
+anchor=right;y=ph1/2;yo=h-1/2    合法，等价于 center-right
+anchor=right;x=pw1/2             错误
+anchor=top;y=ph1/2               错误
+anchor=center;xo=w10             错误，不表示居中后偏移
+anchor=null-null;x=pw1/2         合法，anchor 是空操作
+```
+
+属性顺序不影响冲突或求值。anchor 不支持后间距，也不是用户自定义 sugar 或多个 sugar 组合机制。
 
 ## 使用 ref 组件
 
@@ -101,11 +135,11 @@ x=pw1/2;y=ph1/2;xo=w-1/2;yo=h-1/2
 
 ## 修改与溯源
 
-1. 阅读源文本和图层报告，按结构路径定位实例，按 `source_span` 找到应编辑的源文件范围。
-2. 同一组件的多个实例路径不同，但内部节点通常共享同一个 `source_span`；修改定义会影响所有实例。
-3. `source_span` 使用半开区间，offset 从 0 开始，行列从 1 开始；它是只读溯源信息，不参与求值。CLI 保留原始 CRLF 换行，offset 对应原始文本的字符偏移，不是 UTF-8 字节偏移。
-4. 顶层 `source` 是 image/ref 的内容资源路径；`source_span.source` 是当前 primitive 的源码文件。前者回答“内容从哪里加载”，后者回答“应该去哪里修改”。
-5. 只修改目标属性、primitive 或组件定义，不重排顶层 group、兄弟节点或 `|` 分段。
+1. 阅读源文本和图层报告，按结构路径定位实例，按 `code` 找到应编辑的源码范围。
+2. `resource` 是主内容资源：image 为图片路径，ref 为组件定义路径，rect/text 为 `null`；字体等辅助资源留在 `content_metadata`。
+3. `code.file` 是源码 `.txt` 文件，`code.start/end` 是半开字符范围，不保存代码正文。ref 实例指向调用点，内部节点指向各自定义；重复实例路径不同，但内部节点通常共享同一个 `code`。
+4. offset 从 0 开始，行列从 1 开始；offset 对应原始文本字符，不是 UTF-8 字节。CLI 保留 CRLF，可用 `raw_source[code.start.offset:code.end.offset]` 精确取出 primitive 属性文本。
+5. 纯内存构建且未提供路径时，`code.file=null`，offset 和行列仍保留。只修改目标属性、primitive 或组件定义，不重排顶层 group、兄弟节点或 `|` 分段。
 6. 重新渲染，检查目标矩形、相邻节点和所有相关展开路径。
 
 ## 排版
@@ -141,7 +175,7 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 管道输出；sub
 python3 scripts/layerlang_mvp.py self-test
 ```
 
-确保 54 项自测全部通过。
+确保 58 项自测全部通过。
 
 ## 绝对像素与复杂局部
 
@@ -155,7 +189,7 @@ python3 scripts/layerlang_mvp.py self-test
 - 普通 primitive 和 ref 没有固有尺寸，不要使用 `a`；ref 必须显式写 `w/h`。
 - 引号只在值首生效；不要发明单引号、`\n` 或其他转义。
 - ref 报错时沿 `@定义名` 路径和引用链定位，不要通过暴露内部属性绕开封装。
-- 用户要求表达式、裁剪、多行富文本、URL 图片、参数化 ref、跨层属性访问或绝对像素几何时，说明它们尚未进入 v0.3，不要发明临时语法。
+- 用户要求表达式、裁剪、多行富文本、URL 图片、参数化 ref、跨层属性访问、绝对像素几何、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.4，不要发明临时语法。
 
 ## 视觉反馈
 
