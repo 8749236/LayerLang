@@ -84,7 +84,7 @@ x=pw1/2;y=ph1/2;xo=w-1/2;yo=h-1/2
 
 它适用于所有 primitive 类型，并继续使用当前节点最终尺寸计算 offset。
 
-为避免覆盖顺序歧义，`anchor` 不能与 `x、y、xo、yo` 中任何一个同时出现。其他值、重复 anchor 或上述冲突均报错。未来若增加其他 anchor，必须另写明确 desugar，不能猜测。
+为避免覆盖顺序歧义，`anchor` 不能与 `x、y、xo、yo` 中任何一个同时出现。因此 `anchor=center;xo=w10` 也是错误输入，而不是“居中后再偏移”。其他值、重复 anchor 或上述冲突均报错。未来若出现高频的锚点后偏移需求，必须另写明确的组合顺序，不能由属性书写顺序猜测。未来若增加其他 anchor，也必须另写明确 desugar。
 
 ### 3.4 text 属性
 
@@ -317,7 +317,7 @@ JSON 报告包含：
 - `intrinsic` 固有尺寸；
 - `content_metadata`；
 - `source_span`；
-- `scale` 与 `stretched`；
+- `scale`、`scaled` 与 `stretched`；
 - `rect_px` 与 `rect_exact`；
 - `outside` 越界状态；
 - 可选 `hit` 命中结果。
@@ -344,13 +344,16 @@ JSON 报告包含：
 - 通过 CLI 或提供 `source_path` 时，`source` 为对应文件绝对路径；纯内存构建且未提供路径时为 `null`，但偏移和行列仍保留；
 - span 使用原始源文本，不解码或重排内容。
 
-### 9.3 scale 与 stretched
+`source_span` 解决的是“从报告回到可编辑源码”的溯源问题，而不是几何计算。位置路径回答“这个实例在展开树里的哪里”，源范围回答“应该打开哪个文件、修改哪一段”。例如 `0@card/0/0` 能唯一标识一个展开节点，但不能告诉 agent 它在 `card.txt` 中的具体位置；`source_span` 提供这个映射，也避免靠搜索重复文本猜测修改点。它只读、不参与求值，也不构成 namespace/accessor 语法。
+
+### 9.3 scale、scaled 与 stretched
 
 text/image 每层额外给出：
 
 ```json
 {
   "scale": [0.5, 1.0],
+  "scaled": true,
   "stretched": true
 }
 ```
@@ -361,10 +364,19 @@ text/image 每层额外给出：
 sx = 最终 rect.w / 固有宽度
 sy = 最终 rect.h / 固有高度
 scale = [sx,sy]
+scaled = (sx != 1 or sy != 1)
 stretched = (sx != sy)
 ```
 
-比较使用内部精确分数，JSON 仅承担十进制展示。等比放大或缩小时 `stretched=false`；非等比拉伸时为 `true`。普通矩形和 ref 没有固有内容尺寸，这两个字段为 `null`。
+比较使用内部精确分数，JSON 仅承担十进制展示。三个字段共同区分：
+
+| 状态 | scaled | stretched |
+|---|---:|---:|
+| 固有尺寸，`sx=sy=1` | `false` | `false` |
+| 等比缩放，`sx=sy≠1` | `true` | `false` |
+| 非等比缩放，`sx≠sy` | `true` | `true` |
+
+因此 `stretched=true` 必然蕴含 `scaled=true`，不存在“未缩放却被拉伸”的合法状态。普通矩形和 ref 没有固有内容尺寸，这三个字段为 `null`。
 
 命中使用半开区间，按从底到顶返回所有几何候选，包括容器和 ref 实例。矩形命中不证明该点存在不透明像素。
 
@@ -425,7 +437,7 @@ Layerlang 的几何语言继续使用父矩形比例，不引入像素单位，�
 - 8 项 ref 测试：既有实例、嵌套、循环与保护机制；
 - 5 项引号测试：空格和分隔符、两种转义、带空格资源路径、未闭合行列、非法转义与闭合后缀；
 - 2 项 anchor 测试：与四件套完全等价，以及非法值和属性冲突；
-- 2 项报告测试：主文档与 ref 的 `source_span`，以及等比和非等比 `scale/stretched`。
+- 2 项报告测试：主文档与 ref 的 `source_span`，以及固有、等比和非等比状态下的 `scale/scaled/stretched`。
 
 修改实现后运行：
 
@@ -447,7 +459,8 @@ python3 scripts/layerlang_mvp.py self-test
 - ref 内部属性访问与调用点参数：破坏封装和 parent 确定性，不进入当前版本；
 - 相对 CWD 的字体路径：由相对当前定义文件目录替代；
 - text 强制显式 `size`：由明确的默认 `40` 替代；
-- 用比例 offset 模拟绝对像素：由外部 PNG 与 image/ref 组合做法替代。
+- 用比例 offset 模拟绝对像素：由外部 PNG 与 image/ref 组合做法替代；
+- 通用 namespace/accessor：当前不引入。`pw/ph/w/h/a` 继续是封闭尺寸单位，类型头继续承担固定内容配置，报告字段只读且不参与求值；只有表达式、组件参数或跨层约束出现真实需求时才另行评审。
 
 ## 15. 未来脑洞（非规范）
 
