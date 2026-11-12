@@ -5,7 +5,7 @@ description: Generate, edit, render, and inspect deterministic SVG graphics with
 
 # Layerlang v0.3
 
-使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。把语言规范视为语义权威，把本文件只视为使用流程。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。
+使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。把语言规范视为语义权威，把本文件只视为使用流程。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。当前实现修订为 v0.3.1，语言文法和报告 schema 仍为 v0.3。
 
 ## 准备
 
@@ -46,14 +46,36 @@ description: Generate, edit, render, and inspect deterministic SVG graphics with
 - 字符串只支持 `\"` 和 `\\`；未闭合、其他转义、原始换行和闭合后的非法后缀都会报错。
 - 不使用空白代替 `;` 分隔属性。未加引号的旧写法保持不变。
 - 先按 `size` 生成位图，再由 `w/h` 缩放。报告中的 `scale:[sx,sy]` 可直接区分原尺寸、等比和非等比缩放。
+- 一行多色文字需要拆成多个 text 节点；节点之间不能读取前一段宽度，因此精确连续排布需要外部计算、近似比例或 PNG 素材。相同 font、size 和 y 的拆分文字会共享基线；跨字体或字号时，y 仍只定位位图顶端，不提供基线单位。
 
 ## 字体与图片
 
 - 显式字体和图片的相对路径都相对当前定义文件目录解析，嵌套 ref 内也不例外。
 - 默认字体依次查找 Linux 的 `NotoSansCJK-Regular.ttc`、Windows 的 `NotoSansSC-Regular.ttf` 和 `NotoSansSC-VF.ttf`；实际路径写入 `font_path`。
 - 候选字体度量可能不同，需要跨环境复现时用 `font` 显式提供确定的字体文件。
-- 图片只使用本地 PNG/JPEG，不使用 URL、data URI 或 SVG 图片。
+- 图片只使用本地 PNG/JPEG，不使用 URL、data URI 或 SVG 图片。Windows 的 `C:/...` 和 `C:\...` 是本地绝对路径，不会被当成 URL；引号内使用反斜杠时仍需写成 `\\`。
 - 需要透明背景时省略 `fill`；需要底色时保留它。
+
+## 常用对齐与比例
+
+右对齐和底对齐不需要新的 anchor，直接使用当前节点的最终尺寸：
+
+```text
+右边：x=pw100;xo=w-100
+底边：y=ph100;yo=h-100
+```
+
+它们相对父矩形的右边或底边，对齐的是 layer 矩形边缘；文字位图的字体度量不保证视觉墨迹也贴边。
+
+整数 `N` 表示 `N/100`，分数 `a/b` 直接表示 `a/b`，不要混淆：
+
+```text
+pw5    = 5/100 = 5%
+pw5/2  = 5/2   = 250%
+pw1/40 = 1/40  = 2.5%
+```
+
+元素异常飞出时，先检查 JSON 的 `outside.partial`、`outside.full` 和 `rect_px/rect_exact`，再修改输入；不要用百分比反复猜像素位置。
 
 ## 使用 anchor
 
@@ -81,9 +103,10 @@ x=pw1/2;y=ph1/2;xo=w-1/2;yo=h-1/2
 
 1. 阅读源文本和图层报告，按结构路径定位实例，按 `source_span` 找到应编辑的源文件范围。
 2. 同一组件的多个实例路径不同，但内部节点通常共享同一个 `source_span`；修改定义会影响所有实例。
-3. `source_span` 使用半开区间，offset 从 0 开始，行列从 1 开始；它是只读溯源信息，不参与求值。
-4. 只修改目标属性、primitive 或组件定义，不重排顶层 group、兄弟节点或 `|` 分段。
-5. 重新渲染，检查目标矩形、相邻节点和所有相关展开路径。
+3. `source_span` 使用半开区间，offset 从 0 开始，行列从 1 开始；它是只读溯源信息，不参与求值。CLI 保留原始 CRLF 换行，offset 对应原始文本的字符偏移，不是 UTF-8 字节偏移。
+4. 顶层 `source` 是 image/ref 的内容资源路径；`source_span.source` 是当前 primitive 的源码文件。前者回答“内容从哪里加载”，后者回答“应该去哪里修改”。
+5. 只修改目标属性、primitive 或组件定义，不重排顶层 group、兄弟节点或 `|` 分段。
+6. 重新渲染，检查目标矩形、相邻节点和所有相关展开路径。
 
 ## 排版
 
@@ -110,13 +133,15 @@ python3 scripts/layerlang_mvp.py render 输入.txt \
 
 阅读 `outside.partial` 和 `outside.full` 定位越界对象。越界不是错误，不要自动 clamp，也不要添加裁剪。命中结果包含容器和 ref 实例，按从底到顶排列；几何命中不等于该点一定有不透明像素。
 
+CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 管道输出；subprocess 调用方应按 UTF-8 解码，不要使用系统区域编码。
+
 修改渲染器后运行：
 
 ```bash
 python3 scripts/layerlang_mvp.py self-test
 ```
 
-确保 51 项自测全部通过。
+确保 54 项自测全部通过。
 
 ## 绝对像素与复杂局部
 

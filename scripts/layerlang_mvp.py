@@ -19,6 +19,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -34,14 +35,31 @@ SPEC_VERSION = "0.3"
 HERE = Path(__file__).resolve().parent
 
 
+def source_line_column(source: str, position: int) -> tuple[int, int]:
+    position = max(0, min(position, len(source)))
+    line = 1
+    line_start = 0
+    index = 0
+    while index < position:
+        char = source[index]
+        if char == "\r":
+            if index + 1 < position and source[index + 1] == "\n":
+                index += 1
+            line += 1
+            line_start = index + 1
+        elif char == "\n":
+            line += 1
+            line_start = index + 1
+        index += 1
+    return line, position - line_start + 1
+
+
 class LangError(Exception):
     def __init__(self, message: str, source: str = "", position: int = 0):
         self.message = message
         self.source_path: Optional[str] = None
         self.position = max(0, min(position, len(source)))
-        self.line = source.count("\n", 0, self.position) + 1
-        previous_newline = source.rfind("\n", 0, self.position)
-        self.column = self.position - previous_newline
+        self.line, self.column = source_line_column(source, self.position)
         super().__init__(str(self))
 
     def __str__(self) -> str:
@@ -235,12 +253,13 @@ def parse(source: str) -> list[Group]:
 
 def source_position(source: str, offset: int) -> dict[str, int]:
     offset = max(0, min(offset, len(source)))
-    previous_newline = source.rfind("\n", 0, offset)
-    return {
-        "offset": offset,
-        "line": source.count("\n", 0, offset) + 1,
-        "column": offset - previous_newline,
-    }
+    line, column = source_line_column(source, offset)
+    return {"offset": offset, "line": line, "column": column}
+
+
+def read_source_text(path: Path) -> str:
+    with path.open("r", encoding="utf-8", newline="") as opened:
+        return opened.read()
 
 
 def make_source_span(source: str, start: int, end: int, source_path: Optional[str]) -> dict[str, object]:
@@ -410,7 +429,9 @@ def rasterize_text(text: str, font_path: str, size: int, color: str, resource_di
 
 
 def load_image(source_name: str, resource_dir: Path) -> tuple[bytes, tuple[int, int], dict[str, object], str]:
-    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", source_name):
+    windows_absolute = re.match(r"^[A-Za-z]:[\\/]", source_name)
+    uri_scheme = re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", source_name)
+    if uri_scheme and not windows_absolute:
         raise ValueError("image 只接受本地文件，不接受 URL 或 data URI")
     path = Path(source_name)
     if not path.is_absolute():
@@ -564,7 +585,7 @@ def _evaluate_node(spec, parent, path: str, source: str, context: RefContext) ->
             raise ValueError(f"ref 引用深度超过上限 {MAX_REF_DEPTH}")
         if target not in context.cache:
             try:
-                definition_source = target.read_text(encoding="utf-8")
+                definition_source = read_source_text(target)
             except OSError as error:
                 raise EvaluationError(f"无法读取 ref 定义 {str(target)!r}：{error}", source_span, path) from error
             try:
@@ -996,6 +1017,19 @@ class ImageTests(unittest.TestCase):
         with self.assertRaisesRegex(LangError, "类型头"):
             self.build("[w=pw100;image=sample.png]")
 
+    def test_windows_absolute_paths_are_not_misclassified_as_urls(self) -> None:
+        for source_name in (
+            "C:/definitely-missing-layerlang-image.png",
+            r"C:\definitely-missing-layerlang-image.png",
+        ):
+            with self.subTest(source_name=source_name):
+                with self.assertRaisesRegex(ValueError, "无法读取图片"):
+                    load_image(source_name, self.directory)
+        for source_name in ("C:relative.png", "file:///C:/sample.png"):
+            with self.subTest(source_name=source_name):
+                with self.assertRaisesRegex(ValueError, "只接受本地文件"):
+                    load_image(source_name, self.directory)
+
 
 
 class RefTests(unittest.TestCase):
@@ -1147,6 +1181,100 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["layers"][2]["scale"], [0.5, 1])
         self.assertIsNone(report["layers"][3]["scale"])
 
+    def test_crlf_source_span_offsets_slice_original_main_and_ref_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            main = directory / "main.txt"
+            card = directory / "card.txt"
+            main_source = "\r\n[ref=card;w=pw100;h=ph100]\r\n"
+            card_source = '\r\n[w=pw100;h=ph100;fill=#ffffff|\r\ntext=组件]\r\n'
+            with main.open("w", encoding="utf-8", newline="") as opened:
+                opened.write(main_source)
+            with card.open("w", encoding="utf-8", newline="") as opened:
+                opened.write(card_source)
+            svg = directory / "out.svg"
+            layers = directory / "out.json"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(HERE / "layerlang_mvp.py"),
+                    "render",
+                    str(main),
+                    "--svg",
+                    str(svg),
+                    "--layers",
+                    str(layers),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stderr.decode("utf-8", errors="replace"),
+            )
+            report = json.loads(layers.read_text(encoding="utf-8"))
+            expected = [
+                (main, "ref=card;w=pw100;h=ph100"),
+                (card, "w=pw100;h=ph100;fill=#ffffff"),
+                (card, "text=组件"),
+            ]
+            for layer, (source_path, source_fragment) in zip(report["layers"], expected):
+                with self.subTest(path=layer["path"]):
+                    span = layer["source_span"]
+                    self.assertEqual(span["source"], str(source_path.resolve()))
+                    with source_path.open("r", encoding="utf-8", newline="") as opened:
+                        raw_source = opened.read()
+                    self.assertEqual(
+                        raw_source[span["start"]["offset"]:span["end"]["offset"]],
+                        source_fragment,
+                    )
+
+
+class CliTests(unittest.TestCase):
+    def test_piped_stdout_and_stderr_are_utf8_under_legacy_locale(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            environment = os.environ.copy()
+            environment["PYTHONIOENCODING"] = "gbk"
+
+            def run_cli(input_path: Path, stem: str) -> subprocess.CompletedProcess[bytes]:
+                return subprocess.run(
+                    [
+                        sys.executable,
+                        str(HERE / "layerlang_mvp.py"),
+                        "render",
+                        str(input_path),
+                        "--svg",
+                        str(directory / f"{stem}.svg"),
+                        "--layers",
+                        str(directory / f"{stem}.json"),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=environment,
+                    check=False,
+                )
+
+            valid = directory / "valid.txt"
+            valid.write_text("[w=pw100;h=ph100;fill=#ffffff]", encoding="utf-8")
+            succeeded = run_cli(valid, "valid")
+            self.assertEqual(
+                succeeded.returncode,
+                0,
+                succeeded.stderr.decode("utf-8", errors="replace"),
+            )
+            self.assertIn("已生成", succeeded.stdout.decode("utf-8"))
+
+            invalid = directory / "invalid.txt"
+            invalid.write_text("[text=测试;font=missing.ttf]", encoding="utf-8")
+            failed = run_cli(invalid, "invalid")
+            self.assertEqual(failed.returncode, 1)
+            error_output = failed.stderr.decode("utf-8")
+            self.assertIn("运行错误", error_output)
+            self.assertIn("节点 0", error_output)
+
 
 class ErrorContextTests(unittest.TestCase):
     def test_nested_resource_error_contains_file_span_and_node_path(self) -> None:
@@ -1168,6 +1296,10 @@ class ErrorContextTests(unittest.TestCase):
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="Layerlang v0.3 渲染器")
     subparsers = parser.add_subparsers(dest="command", required=True)
     render_parser = subparsers.add_parser("render")
@@ -1190,13 +1322,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             loader.loadTestsFromTestCase(RefTests),
             loader.loadTestsFromTestCase(AnchorTests),
             loader.loadTestsFromTestCase(ReportTests),
+            loader.loadTestsFromTestCase(CliTests),
             loader.loadTestsFromTestCase(ErrorContextTests),
         ])
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         return 0 if result.wasSuccessful() else 1
     try:
         input_path = Path(args.input)
-        source = input_path.read_text(encoding="utf-8")
+        source = read_source_text(input_path)
         scene = build_scene(source, args.width, args.height, input_path.resolve().parent, input_path.resolve())
         Path(args.svg).write_text(render_svg(scene), encoding="utf-8")
         report = scene_report(scene, tuple(args.hit) if args.hit else None)
