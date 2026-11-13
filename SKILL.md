@@ -1,6 +1,6 @@
 ---
 name: layerlang-mvp
-description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.5 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, and resource/code inspection reports. Use when the user mentions 图层语言、Layerlang、pw/ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, parameterized refs, cross-layer property access, absolute-pixel geometry, user-defined sugar, or photorealistic artwork; those are outside v0.5.
+description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.5 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, and resource/code inspection reports. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, parameterized refs, cross-layer property access, absolute-pixel geometry, user-defined sugar, or photorealistic artwork; those are outside v0.5.
 ---
 
 # Layerlang v0.5
@@ -65,7 +65,19 @@ description: Generate, edit, render, and inspect deterministic SVG graphics with
 底边：anchor=bottom
 ```
 
-它们分别等价于 `x=100pw;xo=-100w` 与 `y=100ph;yo=-100h`，只占用对应轴，另一轴仍可手写。对齐相对父矩形，目标是 layer 矩形边缘；文字位图的字体度量不保证视觉墨迹也贴边。
+它们分别等价于 `x=100pw;xo=-100w` 与 `y=100ph;yo=-100h`，只占用对应轴，另一轴仍可手写。对齐相对**直接父矩形**，目标是 layer 矩形边缘；文字位图的字体度量不保证视觉墨迹也贴边。
+
+需要给 anchor 留白时，先显式缩小或移动父容器，不要在 anchor 占用的轴上再写 `x/y/xo/yo`：
+
+```text
+[
+    w=263/270pw; h=1/12ph; anchor=top-center
+    |
+    text="状态"; anchor=right
+]
+```
+
+这里文字对齐的是内层容器的右边，不是画布右边。容器比父矩形少 `7/270pw`，居中后由左右两侧均分；如果只需要一侧留白，就用 `x/w` 明确容器的位置和宽度。具体像素边距仍需先换算为相对比例，anchor 本身不支持后间距。
 
 整数 `N` 表示 `N/100`，分数 `a/b` 直接表示 `a/b`，不要混淆：
 
