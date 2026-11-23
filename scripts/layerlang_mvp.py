@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Layerlang v0.5：矩形、文字、本地图片、本地引用与可溯源图层检查。
+"""Layerlang constants+px spike（基于 v0.5.1）：验证文件内常量与绝对像素单位。
 
 依赖：Python 标准库与 Pillow。
   python3 layerlang_mvp.py self-test
@@ -31,7 +31,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-SPEC_VERSION = "0.5"
+SPEC_VERSION = "0.6.0-constants-spike"
 HERE = Path(__file__).resolve().parent
 
 
@@ -101,6 +101,19 @@ class Group:
     children: list[NodeSpec]
 
 
+@dataclass
+class ConstantSpec:
+    name: str
+    value: str
+    position: int
+
+
+@dataclass
+class ParsedDocument:
+    groups: list[Group]
+    constant_specs: list[ConstantSpec]
+
+
 @dataclass(frozen=True)
 class Rect:
     x: Fraction
@@ -133,17 +146,46 @@ class Parser:
         while self.pos < len(self.source) and self.source[self.pos].isspace():
             self.pos += 1
 
-    def parse(self) -> list[Group]:
+    def parse(self) -> ParsedDocument:
         groups: list[Group] = []
+        constants: list[ConstantSpec] = []
         self.skip_space()
+        while self.pos < len(self.source) and self.source[self.pos] == "@":
+            constants.append(self.parse_constant())
+            self.skip_space()
         while self.pos < len(self.source):
             if self.source[self.pos] != "[":
-                raise self.error("顶层只能出现由 [ ] 包裹的 primitive")
+                raise self.error("常量声明只能位于文档开头；顶层 primitive 由 [ ] 包裹")
             groups.append(self.parse_group())
             self.skip_space()
         if not groups:
             raise self.error("文档为空", 0)
-        return groups
+        return ParsedDocument(groups, constants)
+
+    def parse_constant(self) -> ConstantSpec:
+        start = self.pos
+        self.pos += 1  # @
+        match = re.match(r"[A-Za-z][A-Za-z0-9]*", self.source[self.pos:])
+        if not match:
+            raise self.error("常量名必须是字母开头的 ASCII 字母数字串", self.pos)
+        name = match.group(0)
+        self.pos += len(name)
+        self.skip_space()
+        if self.pos >= len(self.source) or self.source[self.pos] != "=":
+            raise self.error(f"常量 {name} 后缺少 =", start)
+        self.pos += 1
+        self.skip_space()
+        value_start = self.pos
+        while self.pos < len(self.source) and not self.source[self.pos].isspace():
+            self.pos += 1
+        value = self.source[value_start:self.pos]
+        if not value:
+            raise self.error(f"常量 {name} 缺少值", value_start)
+        while self.pos < len(self.source) and self.source[self.pos] in " \t":
+            self.pos += 1
+        if self.pos < len(self.source) and self.source[self.pos] not in "\r\n":
+            raise self.error("常量声明每行只能有一个值", self.pos)
+        return ConstantSpec(name, value, value_start)
 
     def parse_group(self) -> Group:
         start = self.pos
@@ -247,7 +289,7 @@ class Parser:
         return NodeSpec(attrs, segment_start, segment_end)
 
 
-def parse(source: str) -> list[Group]:
+def parse(source: str) -> ParsedDocument:
     return Parser(source).parse()
 
 
@@ -304,7 +346,8 @@ def outside_status(rect: Rect, canvas: Rect) -> str:
 
 
 LINUX_DEFAULT_FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
-DIMENSION_RE = re.compile(r"^(-?\d+(?:/\d+)?)(pw|ph|w|h|a)$")
+DIMENSION_RE = re.compile(r"^(-?\d+(?:/\d+)?)(pw|ph|w|h|a|px)$")
+CONSTANT_RE = re.compile(r"^(?:(-?\d+(?:/\d+)?)?)@([A-Za-z][A-Za-z0-9]*)$")
 COMMON_ATTRS = {"x", "y", "w", "h", "xo", "yo", "anchor", "fill"}
 TEXT_ATTRS = {"text", "font", "size", "color"}
 IMAGE_ATTRS = {"image"}
@@ -317,6 +360,43 @@ MAX_EXPANDED_NODES = 10000
 class Dimension:
     unit: str
     scale: Fraction
+
+
+def resolve_constants(specs: list[ConstantSpec], source: str) -> dict[str, Dimension]:
+    constants: dict[str, Dimension] = {}
+    for spec in specs:
+        if spec.name in constants:
+            raise LangError(f"常量 {spec.name} 重复声明", source, spec.position)
+        direct = DIMENSION_RE.fullmatch(spec.value)
+        if direct:
+            number, unit = direct.groups()
+            if "/" in number:
+                numerator, denominator = number.split("/", 1)
+                if int(denominator) == 0:
+                    raise LangError("分数分母不能为零", source, spec.position)
+                scale = Fraction(int(numerator), int(denominator))
+            else:
+                scale = Fraction(int(number)) if unit == "px" else Fraction(int(number), 100)
+            constants[spec.name] = Dimension(unit, scale)
+            continue
+        reference = CONSTANT_RE.fullmatch(spec.value)
+        if not reference:
+            raise LangError("常量值必须是尺寸或 倍数@先前常量", source, spec.position)
+        multiplier, name = reference.groups()
+        if name not in constants:
+            raise LangError(f"常量 {spec.name} 只能引用先前声明的常量；未找到 {name}", source, spec.position)
+        if multiplier is None:
+            factor = Fraction(1)
+        elif "/" in multiplier:
+            numerator, denominator = multiplier.split("/", 1)
+            if int(denominator) == 0:
+                raise LangError("分数分母不能为零", source, spec.position)
+            factor = Fraction(int(numerator), int(denominator))
+        else:
+            factor = Fraction(int(multiplier))
+        base = constants[name]
+        constants[spec.name] = Dimension(base.unit, base.scale * factor)
+    return constants
 
 
 ANCHOR_ALIASES = {
@@ -385,26 +465,44 @@ class Scene:
 @dataclass
 class RefContext:
     resource_dir: Path
-    cache: dict[Path, tuple[str, list[Group]]] = field(default_factory=dict)
+    cache: dict[Path, tuple[str, ParsedDocument]] = field(default_factory=dict)
     stack: list[Path] = field(default_factory=list)
     created_nodes: int = 0
 
 
-def parse_dimension(attr, source: str, allowed: set[str]) -> Dimension:
+def parse_dimension(attr, source: str, allowed: set[str], constants: dict[str, Dimension]) -> Dimension:
     match = DIMENSION_RE.fullmatch(attr.value)
-    if not match:
-        raise LangError(f"{attr.name} 必须使用 数字+单位，例如 100pw、1/12ph、50a、-1/2w；收到 {attr.value!r}", source, attr.position)
-    number, unit = match.groups()
-    if unit not in allowed:
-        raise LangError(f"{attr.name} 不允许单位 {unit}；允许：{sorted(allowed)}", source, attr.position)
-    if "/" in number:
-        numerator, denominator = number.split("/", 1)
-        if int(denominator) == 0:
-            raise LangError("分数分母不能为零", source, attr.position)
-        scale = Fraction(int(numerator), int(denominator))
+    if match:
+        number, unit = match.groups()
+        if "/" in number:
+            numerator, denominator = number.split("/", 1)
+            if int(denominator) == 0:
+                raise LangError("分数分母不能为零", source, attr.position)
+            scale = Fraction(int(numerator), int(denominator))
+        else:
+            scale = Fraction(int(number)) if unit == "px" else Fraction(int(number), 100)
+        dimension = Dimension(unit, scale)
     else:
-        scale = Fraction(int(number), 100)
-    return Dimension(unit, scale)
+        reference = CONSTANT_RE.fullmatch(attr.value)
+        if not reference:
+            raise LangError(f"{attr.name} 必须使用 数字+单位或 常量引用，例如 100pw、24px、1/12ph、@margin；收到 {attr.value!r}", source, attr.position)
+        multiplier, name = reference.groups()
+        if name not in constants:
+            raise LangError(f"未找到当前文件常量 {name}", source, attr.position)
+        base = constants[name]
+        if multiplier is None:
+            factor = Fraction(1)
+        elif "/" in multiplier:
+            numerator, denominator = multiplier.split("/", 1)
+            if int(denominator) == 0:
+                raise LangError("分数分母不能为零", source, attr.position)
+            factor = Fraction(int(numerator), int(denominator))
+        else:
+            factor = Fraction(int(multiplier))
+        dimension = Dimension(base.unit, base.scale * factor)
+    if dimension.unit not in allowed:
+        raise LangError(f"{attr.name} 不允许单位 {dimension.unit}；允许：{sorted(allowed)}", source, attr.position)
+    return dimension
 
 
 def validate_color(attr, source: str) -> str:
@@ -492,7 +590,7 @@ def load_image(source_name: str, resource_dir: Path) -> tuple[bytes, tuple[int, 
     return buffer.getvalue(), (width, height), metadata, str(path)
 
 
-def validate_common(spec, source: str, kind: str) -> dict[str, object]:
+def validate_common(spec, source: str, kind: str, constants: dict[str, Dimension]) -> dict[str, object]:
     attrs = spec.attrs
     type_attrs = TEXT_ATTRS if kind == "text" else IMAGE_ATTRS if kind == "image" else REF_ATTRS if kind == "ref" else set()
     allowed = COMMON_ATTRS | type_attrs
@@ -513,28 +611,28 @@ def validate_common(spec, source: str, kind: str) -> dict[str, object]:
         dimensions.update(expanded)
     for name in ("x", "xo"):
         if name in attrs:
-            dimensions[name] = parse_dimension(attrs[name], source, {"pw"} if name == "x" else {"pw", "w"})
+            dimensions[name] = parse_dimension(attrs[name], source, {"pw", "px"} if name == "x" else {"pw", "w", "px"}, constants)
     for name in ("y", "yo"):
         if name in attrs:
-            dimensions[name] = parse_dimension(attrs[name], source, {"ph"} if name == "y" else {"ph", "h"})
+            dimensions[name] = parse_dimension(attrs[name], source, {"ph", "px"} if name == "y" else {"ph", "h", "px"}, constants)
     has_intrinsic = kind in {"text", "image"}
-    width_units = {"pw", "a"} if has_intrinsic else {"pw"}
-    height_units = {"ph", "a"} if has_intrinsic else {"ph"}
+    width_units = {"pw", "a", "px"} if has_intrinsic else {"pw", "px"}
+    height_units = {"ph", "a", "px"} if has_intrinsic else {"ph", "px"}
     if has_intrinsic:
-        dimensions["w"] = parse_dimension(attrs["w"], source, width_units) if "w" in attrs else Dimension("a", Fraction(1))
-        dimensions["h"] = parse_dimension(attrs["h"], source, height_units) if "h" in attrs else Dimension("a", Fraction(1))
+        dimensions["w"] = parse_dimension(attrs["w"], source, width_units, constants) if "w" in attrs else Dimension("a", Fraction(1))
+        dimensions["h"] = parse_dimension(attrs["h"], source, height_units, constants) if "h" in attrs else Dimension("a", Fraction(1))
     else:
         for required in ("w", "h"):
             if required not in attrs:
                 label = "ref" if kind == "ref" else "普通"
                 suffix = "；ref 没有 auto 尺寸" if kind == "ref" else ""
                 raise LangError(f"{label} primitive 缺少 {required}{suffix}", source, spec.position)
-        dimensions["w"] = parse_dimension(attrs["w"], source, width_units)
-        dimensions["h"] = parse_dimension(attrs["h"], source, height_units)
+        dimensions["w"] = parse_dimension(attrs["w"], source, width_units, constants)
+        dimensions["h"] = parse_dimension(attrs["h"], source, height_units, constants)
     return {"fill": fill, "dimensions": dimensions}
 
 
-def _evaluate_node(spec, parent, path: str, source: str, context: RefContext) -> Node:
+def _evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Dimension], context: RefContext) -> Node:
     context.created_nodes += 1
     if context.created_nodes > MAX_EXPANDED_NODES:
         raise ValueError(f"展开节点数超过上限 {MAX_EXPANDED_NODES}")
@@ -545,7 +643,7 @@ def _evaluate_node(spec, parent, path: str, source: str, context: RefContext) ->
     kind = heads[0] if heads else "rect"
     if heads and names[0] != heads[0]:
         raise LangError(f"{kind} 是类型头，必须是第一个属性", source, spec.attrs[kind].position)
-    common = validate_common(spec, source, kind)
+    common = validate_common(spec, source, kind, constants)
     dimensions = common["dimensions"]
     current_dir = context.stack[-1].parent if context.stack else context.resource_dir
     current_source = str(context.stack[-1]) if context.stack else None
@@ -578,6 +676,8 @@ def _evaluate_node(spec, parent, path: str, source: str, context: RefContext) ->
             raise EvaluationError(str(error), code, path) from error
 
     def basis(dimension: Dimension, own_w: Fraction, own_h: Fraction) -> Fraction:
+        if dimension.unit == "px":
+            return Fraction(1)
         if dimension.unit == "pw":
             return parent.w
         if dimension.unit == "ph":
@@ -621,15 +721,17 @@ def _evaluate_node(spec, parent, path: str, source: str, context: RefContext) ->
             except OSError as error:
                 raise EvaluationError(f"无法读取 ref 定义 {str(target)!r}：{error}", code, path) from error
             try:
-                groups = parse(definition_source)
+                document = parse(definition_source)
+                definition_constants = resolve_constants(document.constant_specs, definition_source)
             except LangError as error:
                 error.source_path = str(target)
                 raise
-            context.cache[target] = (definition_source, groups)
-        definition_source, groups = context.cache[target]
+            context.cache[target] = (definition_source, document)
+        definition_source, document = context.cache[target]
+        definition_constants = resolve_constants(document.constant_specs, definition_source)
         context.stack.append(target)
         try:
-            node.expansion = evaluate_groups(groups, rect, f"{path}@{ref_name}", definition_source, context)
+            node.expansion = evaluate_groups(document.groups, rect, f"{path}@{ref_name}", definition_source, definition_constants, context)
         finally:
             context.stack.pop()
         node.resource = str(target)
@@ -637,22 +739,22 @@ def _evaluate_node(spec, parent, path: str, source: str, context: RefContext) ->
     return node
 
 
-def evaluate_node(spec, parent, path: str, source: str, context: RefContext) -> Node:
+def evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Dimension], context: RefContext) -> Node:
     try:
-        return _evaluate_node(spec, parent, path, source, context)
+        return _evaluate_node(spec, parent, path, source, constants, context)
     except LangError as error:
         if error.source_path is None and context.stack:
             error.source_path = str(context.stack[-1])
         raise
 
 
-def evaluate_groups(groups: list[Group], parent: Rect, prefix: str, source: str, context: RefContext) -> list[Node]:
+def evaluate_groups(groups: list[Group], parent: Rect, prefix: str, source: str, constants: dict[str, Dimension], context: RefContext) -> list[Node]:
     roots: list[Node] = []
     for root_index, group in enumerate(groups):
         root_path = f"{prefix}/{root_index}" if prefix else str(root_index)
-        root = evaluate_node(group.base, parent, root_path, source, context)
+        root = evaluate_node(group.base, parent, root_path, source, constants, context)
         root.children = [
-            evaluate_node(child, root.rect, f"{root_path}/{index}", source, context)
+            evaluate_node(child, root.rect, f"{root_path}/{index}", source, constants, context)
             for index, child in enumerate(group.children)
         ]
         roots.append(root)
@@ -678,19 +780,20 @@ def build_scene(source: str, width: int = 1200, height: int = 1200, resource_dir
     context = RefContext(resource_dir=resource_dir, stack=stack)
     canvas = Rect(Fraction(0), Fraction(0), Fraction(width), Fraction(height))
     try:
-        groups = parse(source)
+        document = parse(source)
+        constants = resolve_constants(document.constant_specs, source)
     except LangError as error:
         if source_path is not None:
             error.source_path = str(source_path.resolve())
         raise
-    roots = evaluate_groups(groups, canvas, "", source, context)
+    roots = evaluate_groups(document.groups, canvas, "", source, constants, context)
     return Scene(width, height, roots, flatten(roots))
 
 
 def render_svg(scene: Scene) -> str:
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{scene.width}" height="{scene.height}" viewBox="0 0 {scene.width} {scene.height}">',
-        "  <!-- Layerlang v0.5: deterministic layers; content is scaled without preserving aspect ratio. -->",
+        "  <!-- Layerlang constants+px spike: deterministic layers; content is scaled without preserving aspect ratio. -->",
     ]
     for index, node in enumerate(scene.layers):
         rect = node.rect
@@ -1372,6 +1475,58 @@ class ReportTests(unittest.TestCase):
                     )
 
 
+class ConstantsTests(unittest.TestCase):
+    def test_px_and_derived_constants_evaluate_exactly(self) -> None:
+        source = "@margin=24px\n@halfMargin=1/2@margin\n[x=@margin;y=@halfMargin;w=48px;h=1/2@margin;fill=#000000]"
+        rect = build_scene(source, 200, 100).layers[0].rect
+        self.assertEqual(rect, Rect(Fraction(24), Fraction(12), Fraction(48), Fraction(12)))
+
+    def test_constant_multipliers_keep_their_unit(self) -> None:
+        source = "@half=50pw\n@double=2@half\n[x=1/2@half;w=@half;h=100ph][w=@double;h=100ph]"
+        scene = build_scene(source)
+        self.assertEqual(scene.layers[0].rect.x, 300)
+        self.assertEqual(scene.layers[0].rect.w, 600)
+        self.assertEqual(scene.layers[1].rect.w, 1200)
+
+    def test_ref_constants_are_local_to_each_definition_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "card.txt").write_text("@margin=7px\n[x=@margin;w=10px;h=10px;fill=#ffffff]", encoding="utf-8")
+            scene = build_scene("@margin=19px\n[ref=card;w=100pw;h=100ph][x=@margin;w=10px;h=10px]", resource_dir=directory)
+            internal = next(node for node in scene.layers if "@card" in node.path)
+            self.assertEqual(internal.rect.x, 7)
+            self.assertEqual(scene.layers[-1].rect.x, 19)
+            (directory / "bad.txt").write_text("[x=@margin;w=10px;h=10px]", encoding="utf-8")
+            with self.assertRaisesRegex(LangError, "未找到当前文件常量"):
+                build_scene("[ref=bad;w=100pw;h=100ph]", resource_dir=directory)
+
+    def test_invalid_declarations_and_unknown_references_are_rejected(self) -> None:
+        invalid_sources = [
+            "@m=1px\n@m=2px\n[w=10px;h=10px]",
+            "@first=@later\n@later=1px\n[w=10px;h=10px]",
+            "@m=1/0px\n[w=10px;h=10px]",
+            "[w=10px;h=10px]\n@m=1px",
+            "[x=@missing;w=10px;h=10px]",
+        ]
+        for source in invalid_sources:
+            with self.subTest(source=source):
+                with self.assertRaises(LangError):
+                    build_scene(source)
+
+    def test_px_and_constant_units_remain_strictly_checked(self) -> None:
+        with self.assertRaisesRegex(LangError, "必须大于零"):
+            build_scene("[w=0px;h=10px]")
+        with self.assertRaisesRegex(LangError, "不允许单位 w"):
+            build_scene("@own=50w\n[x=@own;w=10px;h=10px]")
+
+    def test_crlf_header_preserves_original_code_offsets(self) -> None:
+        source = "@m=2px\r\n[x=@m;w=10px;h=10px]\r\n"
+        report = scene_report(build_scene(source))
+        code = report["layers"][0]["code"]
+        self.assertEqual(source[code["start"]["offset"]:code["end"]["offset"]], "x=@m;w=10px;h=10px")
+        self.assertEqual(code["start"]["line"], 2)
+
+
 class CliTests(unittest.TestCase):
     def test_piped_stdout_and_stderr_are_utf8_under_legacy_locale(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1440,7 +1595,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Layerlang v0.5 渲染器")
+    parser = argparse.ArgumentParser(description="Layerlang constants+px spike 渲染器")
     subparsers = parser.add_subparsers(dest="command", required=True)
     render_parser = subparsers.add_parser("render")
     render_parser.add_argument("input")
@@ -1462,6 +1617,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             loader.loadTestsFromTestCase(RefTests),
             loader.loadTestsFromTestCase(AnchorTests),
             loader.loadTestsFromTestCase(ReportTests),
+            loader.loadTestsFromTestCase(ConstantsTests),
             loader.loadTestsFromTestCase(CliTests),
             loader.loadTestsFromTestCase(ErrorContextTests),
         ])
