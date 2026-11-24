@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Layerlang v0.7：矩形、文字、本地图片、本地引用、文件内常量、lining 与可溯源图层检查。
+"""Layerlang v0.8：矩形、文字、本地图片、参数化本地引用、文件内常量、lining 与可溯源图层检查。
 
 依赖：Python 标准库与 Pillow。
   python3 layerlang_mvp.py self-test
@@ -31,7 +31,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-SPEC_VERSION = "0.7"
+SPEC_VERSION = "0.8"
 HERE = Path(__file__).resolve().parent
 
 
@@ -86,6 +86,7 @@ class Attr:
     name: str
     value: str
     position: int
+    quoted: bool = False
 
 
 @dataclass
@@ -248,7 +249,7 @@ class Parser:
         while True:
             self.skip_space()
             key_start = self.pos
-            match = re.match(r"[a-z]+", self.source[self.pos:])
+            match = re.match(r"[a-z][a-z0-9_]*", self.source[self.pos:])
             if not match:
                 raise self.error("预期属性名；当前版本不支持嵌套括号")
             name = match.group(0)
@@ -259,7 +260,8 @@ class Parser:
             self.pos += 1
             self.skip_space()
             value_start = self.pos
-            if self.pos < len(self.source) and self.source[self.pos] == '"':
+            quoted = self.pos < len(self.source) and self.source[self.pos] == '"'
+            if quoted:
                 value, value_end = self.parse_quoted_value()
             else:
                 while self.pos < len(self.source):
@@ -275,7 +277,7 @@ class Parser:
                     raise self.error(f"属性 {name} 缺少值", value_start)
             if name in attrs:
                 raise self.error(f"属性 {name} 重复", key_start)
-            attrs[name] = Attr(name, value, value_start)
+            attrs[name] = Attr(name, value, value_start, quoted)
             segment_end = value_end
             self.skip_space()
             if self.pos < len(self.source) and self.source[self.pos] == ";":
@@ -348,6 +350,15 @@ def outside_status(rect: Rect, canvas: Rect) -> str:
 LINUX_DEFAULT_FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 DIMENSION_RE = re.compile(r"^(-?\d+(?:/\d+)?)(pw|ph|w|h|a|px)$")
 CONSTANT_RE = re.compile(r"^(?:(-?\d+(?:/\d+)?)?)@([A-Za-z][A-Za-z0-9]*)$")
+PARAMETER_RE = re.compile(r"^\$([a-z][a-z0-9_]*)$")
+PARAMETER_TARGETS = {
+    "text": "text",
+    "color": "color",
+    "fill": "color",
+    "x": "dimension", "y": "dimension", "w": "dimension", "h": "dimension",
+    "xo": "dimension", "yo": "dimension",
+    "ll": "dimension", "lr": "dimension", "lt": "dimension", "lb": "dimension",
+}
 COMMON_ATTRS = {"x", "y", "w", "h", "xo", "yo", "anchor", "fill", "lining", "ll", "lr", "lt", "lb"}
 TEXT_ATTRS = {"text", "font", "size", "color"}
 IMAGE_ATTRS = {"image"}
@@ -397,6 +408,92 @@ def resolve_constants(specs: list[ConstantSpec], source: str) -> dict[str, Dimen
         base = constants[name]
         constants[spec.name] = Dimension(base.unit, base.scale * factor)
     return constants
+
+
+@dataclass(frozen=True)
+class ParameterValue:
+    kind: str
+    value: object
+
+
+def parameter_name(attr: Attr) -> Optional[str]:
+    if attr.quoted:
+        return None
+    match = PARAMETER_RE.fullmatch(attr.value)
+    return match.group(1) if match else None
+
+
+def iter_node_specs(document: ParsedDocument):
+    for group in document.groups:
+        yield group.base
+        yield from group.children
+
+
+def infer_parameters(document: ParsedDocument, source: str) -> dict[str, str]:
+    inferred: dict[str, str] = {}
+    reserved = COMMON_ATTRS | TEXT_ATTRS | IMAGE_ATTRS | REF_ATTRS
+    for spec in iter_node_specs(document):
+        for attr in spec.attrs.values():
+            name = parameter_name(attr)
+            if name is None:
+                continue
+            kind = PARAMETER_TARGETS.get(attr.name)
+            if kind is None:
+                raise LangError(f"参数 ${name} 只能用于受支持的 text、color、fill 或几何属性；不允许嵌套转发", source, attr.position)
+            if name in reserved:
+                raise LangError(f"参数名 {name} 与内置属性冲突", source, attr.position)
+            previous = inferred.get(name)
+            if previous is not None and previous != kind:
+                raise LangError(f"参数 {name} 同时被当作 {previous} 和 {kind} 使用", source, attr.position)
+            inferred[name] = kind
+    return inferred
+
+
+def dimension_text(dimension: Dimension) -> str:
+    numerator, denominator = dimension.scale.numerator, dimension.scale.denominator
+    if dimension.unit == "px" and denominator == 1:
+        return f"{numerator}px"
+    return f"{numerator}/{denominator}{dimension.unit}"
+
+
+def substitute_document(document: ParsedDocument, values: dict[str, ParameterValue]) -> ParsedDocument:
+    def substitute(spec: NodeSpec) -> NodeSpec:
+        attrs: dict[str, Attr] = {}
+        for name, attr in spec.attrs.items():
+            placeholder = parameter_name(attr)
+            if placeholder is None:
+                attrs[name] = attr
+                continue
+            value = values[placeholder]
+            rendered = value.value if value.kind in {"text", "color"} else dimension_text(value.value)
+            attrs[name] = Attr(name, rendered, attr.position, True)
+        return NodeSpec(attrs, spec.position, spec.end)
+
+    groups = [Group(substitute(group.base), [substitute(child) for child in group.children]) for group in document.groups]
+    return ParsedDocument(groups, document.constant_specs)
+
+
+def bind_parameters(document: ParsedDocument, attrs: dict[str, Attr], source: str, constants: dict[str, Dimension], ref_attr: Attr, definition_source: str) -> tuple[dict[str, ParameterValue], ParsedDocument]:
+    expected = infer_parameters(document, definition_source)
+    reserved = COMMON_ATTRS | TEXT_ATTRS | IMAGE_ATTRS | REF_ATTRS
+    for attr in attrs.values():
+        if attr.name in reserved:
+            continue
+        if attr.name not in expected:
+            raise LangError(f"未知 ref 参数 {attr.name}；组件需要：{sorted(expected)}", source, attr.position)
+    missing = set(expected) - set(attrs)
+    if missing:
+        raise LangError(f"ref 缺少参数：{sorted(missing)}", source, ref_attr.position)
+    values: dict[str, ParameterValue] = {}
+    for name, kind in expected.items():
+        attr = attrs[name]
+        if kind == "text":
+            values[name] = ParameterValue(kind, attr.value)
+        elif kind == "color":
+            values[name] = ParameterValue(kind, validate_color(attr, source))
+        else:
+            values[name] = ParameterValue(kind, parse_dimension(attr, source, {"pw", "ph", "w", "h", "a", "px"}, constants))
+    return values, substitute_document(document, values)
 
 
 ANCHOR_ALIASES = {
@@ -609,10 +706,10 @@ def load_image(source_name: str, resource_dir: Path) -> tuple[bytes, tuple[int, 
     return buffer.getvalue(), (width, height), metadata, str(path)
 
 
-def validate_common(spec, source: str, kind: str, constants: dict[str, Dimension]) -> dict[str, object]:
+def validate_common(spec, source: str, kind: str, constants: dict[str, Dimension], parameters: Optional[set[str]] = None) -> dict[str, object]:
     attrs = spec.attrs
     type_attrs = TEXT_ATTRS if kind == "text" else IMAGE_ATTRS if kind == "image" else REF_ATTRS if kind == "ref" else set()
-    allowed = COMMON_ATTRS | type_attrs
+    allowed = COMMON_ATTRS | type_attrs | (parameters or set())
     for attr in attrs.values():
         if attr.name not in allowed:
             raise LangError(f"未知属性 {attr.name}，或当前 primitive 类型不允许该属性", source, attr.position)
@@ -680,12 +777,49 @@ def _evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Di
     kind = heads[0] if heads else "rect"
     if heads and names[0] != heads[0]:
         raise LangError(f"{kind} 是类型头，必须是第一个属性", source, spec.attrs[kind].position)
-    common = validate_common(spec, source, kind, constants)
-    dimensions = common["dimensions"]
-    lining = common["lining"]
     current_dir = context.stack[-1].parent if context.stack else context.resource_dir
     current_source = str(context.stack[-1]) if context.stack else None
     code = make_code_location(source, spec.position, spec.end, current_source)
+    parameter_names: set[str] = set()
+    parameter_values: dict[str, ParameterValue] = {}
+    ref_document = None
+    definition_source = None
+    definition_constants: dict[str, Dimension] = {}
+    target = None
+    if kind != "ref":
+        for attr in spec.attrs.values():
+            placeholder = parameter_name(attr)
+            if placeholder is not None:
+                raise LangError(f"参数 ${placeholder} 只能在 ref 定义实例化时使用", source, attr.position)
+    else:
+        ref_name = spec.attrs["ref"].value
+        if not ref_name or ref_name in {".", ".."} or "/" in ref_name or "\\" in ref_name or "@" in ref_name or ref_name.endswith(".txt"):
+            raise LangError("ref 只接受不带路径、@ 和 .txt 后缀的定义名", source, spec.attrs["ref"].position)
+        target = (current_dir / f"{ref_name}.txt").resolve()
+        if target in context.stack:
+            chain = " → ".join(path.name for path in [*context.stack, target])
+            raise ValueError(f"ref 引用循环：{chain}")
+        if len(context.stack) >= MAX_REF_DEPTH:
+            raise ValueError(f"ref 引用深度超过上限 {MAX_REF_DEPTH}")
+        if target not in context.cache:
+            try:
+                definition_source = read_source_text(target)
+            except OSError as error:
+                raise EvaluationError(f"无法读取 ref 定义 {str(target)!r}：{error}", code, path) from error
+            try:
+                document = parse(definition_source)
+                resolve_constants(document.constant_specs, definition_source)
+            except LangError as error:
+                error.source_path = str(target)
+                raise
+            context.cache[target] = (definition_source, document)
+        definition_source, document = context.cache[target]
+        parameter_names = set(infer_parameters(document, definition_source))
+        parameter_values, ref_document = bind_parameters(document, spec.attrs, source, constants, spec.attrs["ref"], definition_source)
+        definition_constants = resolve_constants(document.constant_specs, definition_source)
+    common = validate_common(spec, source, kind, constants, parameter_names)
+    dimensions = common["dimensions"]
+    lining = common["lining"]
 
     text = None
     source_name = None
@@ -752,35 +886,19 @@ def _evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Di
     node = Node(rect=rect, parent_rect=parent, path=path, fill=common["fill"], kind=kind, text=text, resource=source_name, png=png, intrinsic=intrinsic, metadata=metadata, code=code, child_rect=child_rect)
     if kind == "ref":
         ref_name = spec.attrs["ref"].value
-        if not ref_name or ref_name in {".", ".."} or "/" in ref_name or "\\" in ref_name or "@" in ref_name or ref_name.endswith(".txt"):
-            raise LangError("ref 只接受不带路径、@ 和 .txt 后缀的定义名", source, spec.attrs["ref"].position)
-        target = (current_dir / f"{ref_name}.txt").resolve()
-        if target in context.stack:
-            chain = " → ".join(path.name for path in [*context.stack, target])
-            raise ValueError(f"ref 引用循环：{chain}")
-        if len(context.stack) >= MAX_REF_DEPTH:
-            raise ValueError(f"ref 引用深度超过上限 {MAX_REF_DEPTH}")
-        if target not in context.cache:
-            try:
-                definition_source = read_source_text(target)
-            except OSError as error:
-                raise EvaluationError(f"无法读取 ref 定义 {str(target)!r}：{error}", code, path) from error
-            try:
-                document = parse(definition_source)
-                definition_constants = resolve_constants(document.constant_specs, definition_source)
-            except LangError as error:
-                error.source_path = str(target)
-                raise
-            context.cache[target] = (definition_source, document)
-        definition_source, document = context.cache[target]
-        definition_constants = resolve_constants(document.constant_specs, definition_source)
+        assert ref_document is not None and definition_source is not None and target is not None
         context.stack.append(target)
         try:
-            node.expansion = evaluate_groups(document.groups, child_rect, f"{path}@{ref_name}", definition_source, definition_constants, context)
+            node.expansion = evaluate_groups(ref_document.groups, child_rect, f"{path}@{ref_name}", definition_source, definition_constants, context)
         finally:
             context.stack.pop()
         node.resource = str(target)
         node.metadata = {"ref_path": str(target), "expanded_roots": len(node.expansion)}
+        if parameter_values:
+            node.metadata["parameters"] = {
+                name: {"type": value.kind, "value": value.value if value.kind != "dimension" else dimension_text(value.value)}
+                for name, value in parameter_values.items()
+            }
     return node
 
 
@@ -838,7 +956,7 @@ def build_scene(source: str, width: int = 1200, height: int = 1200, resource_dir
 def render_svg(scene: Scene) -> str:
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{scene.width}" height="{scene.height}" viewBox="0 0 {scene.width} {scene.height}">',
-        "  <!-- Layerlang v0.7: deterministic layers; content is scaled without preserving aspect ratio. -->",
+        "  <!-- Layerlang v0.8: deterministic layers; content is scaled without preserving aspect ratio. -->",
     ]
     for index, node in enumerate(scene.layers):
         rect = node.rect
@@ -1643,6 +1761,99 @@ class LiningTests(unittest.TestCase):
             build_scene("[w=100px;h=100px;ll=1/2a]")
 
 
+class ParameterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.directory = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write(self, name: str, source: str) -> None:
+        (self.directory / f"{name}.txt").write_text(source, encoding="utf-8")
+
+    def build(self, source: str) -> Scene:
+        return build_scene(source, resource_dir=self.directory)
+
+    def test_text_and_color_parameters_create_independent_variants(self) -> None:
+        self.write("event", "[text=$label;size=12;color=$kind_color]")
+        scene = self.build(
+            "[ref=event;label=CALL;kind_color=#79c0ff;w=100px;h=40px]"
+            "[ref=event;label=RET;kind_color=#7ee787;w=100px;h=40px]"
+        )
+        first, second = scene.layers[1], scene.layers[3]
+        self.assertEqual((first.text, second.text), ("CALL", "RET"))
+        self.assertEqual(first.metadata["foreground"], "#79c0ff")
+        self.assertEqual(second.metadata["foreground"], "#7ee787")
+        parameters = scene.layers[0].metadata["parameters"]
+        self.assertEqual(parameters["kind_color"], {"type": "color", "value": "#79c0ff"})
+
+    def test_dimension_parameters_resolve_caller_constants(self) -> None:
+        self.write("chip", "[x=$offset;w=$width;h=24px;fill=$bg]")
+        scene = self.build("@pad=24px\n[ref=chip;offset=@pad;width=2@pad;bg=#ffffff;w=200px;h=100px]")
+        internal = scene.layers[1]
+        self.assertEqual(internal.rect, Rect(Fraction(24), Fraction(0), Fraction(48), Fraction(24)))
+        parameters = scene.layers[0].metadata["parameters"]
+        self.assertEqual(parameters["offset"], {"type": "dimension", "value": "24px"})
+        self.assertEqual(parameters["width"], {"type": "dimension", "value": "48px"})
+
+    def test_quoted_placeholders_are_literal_text(self) -> None:
+        self.write("literal", "[text=\"$label\"][text=\"hello $label\"]")
+        scene = self.build("[ref=literal;w=100px;h=100px]")
+        self.assertEqual([node.text for node in scene.layers[1:]], ["$label", "hello $label"])
+
+    def test_missing_unknown_and_reserved_parameters_are_rejected(self) -> None:
+        self.write("event", "[text=$label]")
+        with self.assertRaisesRegex(LangError, "缺少参数"):
+            self.build("[ref=event;w=100px;h=100px]")
+        with self.assertRaisesRegex(LangError, "未知 ref 参数 extra"):
+            self.build("[ref=event;label=CALL;extra=1;w=100px;h=100px]")
+        self.write("bad", "[text=$w]")
+        with self.assertRaisesRegex(LangError, "内置属性冲突"):
+            self.build("[ref=bad;w=100px;h=100px]")
+
+    def test_invalid_values_and_type_conflicts_are_rejected(self) -> None:
+        self.write("event", "[text=$label;color=$tone]")
+        with self.assertRaisesRegex(LangError, "颜色只接受"):
+            self.build("[ref=event;label=CALL;tone=#fff;w=100px;h=100px]")
+        self.write("chip", "[x=$offset;w=10px;h=10px]")
+        with self.assertRaisesRegex(LangError, "数字\\+单位"):
+            self.build("[ref=chip;offset=nope;w=100px;h=100px]")
+        self.write("conflict", "[text=$thing][w=10px;h=10px;fill=$thing]")
+        with self.assertRaisesRegex(LangError, "同时被当作"):
+            self.build("[ref=conflict;thing=#ffffff;w=100px;h=100px]")
+
+    def test_nested_literal_arguments_work_but_forwarding_is_rejected(self) -> None:
+        self.write("child", "[text=$label]")
+        self.write("outer", "[ref=child;label=static;w=100pw;h=100ph]")
+        scene = self.build("[ref=outer;w=100px;h=100px]")
+        self.assertEqual(scene.layers[-1].text, "static")
+        self.write("forward", "[ref=child;label=$label;w=100pw;h=100ph]")
+        with self.assertRaisesRegex(LangError, "不允许嵌套转发"):
+            self.build("[ref=forward;label=value;w=100px;h=100px]")
+
+    def test_report_keeps_definition_code_and_instance_arguments(self) -> None:
+        self.write("event", "[text=$label;color=$tone]")
+        main = self.directory / "main.txt"
+        main.write_text("[ref=event;label=CALL;tone=#79c0ff;w=100px;h=40px]", encoding="utf-8")
+        report = scene_report(build_scene(main.read_text(encoding="utf-8"), resource_dir=self.directory, source_path=main))
+        instance, internal = report["layers"]
+        self.assertEqual(instance["code"]["file"], str(main.resolve()))
+        self.assertEqual(internal["code"]["file"], str((self.directory / "event.txt").resolve()))
+        self.assertEqual(internal["code"]["start"]["offset"], 1)
+        self.assertEqual(instance["content_metadata"]["parameters"]["label"], {"type": "text", "value": "CALL"})
+
+    def test_standalone_and_unsupported_parameter_positions_are_rejected(self) -> None:
+        with self.assertRaisesRegex(LangError, "只能在 ref 定义实例化时使用"):
+            build_scene("[text=$label]")
+        self.write("badlining", "[w=100px;h=100px;lining=$pad]")
+        with self.assertRaisesRegex(LangError, "只能用于受支持"):
+            self.build("[ref=badlining;pad=24px;w=100px;h=100px]")
+        self.write("badsize", "[text=hello;size=$size]")
+        with self.assertRaisesRegex(LangError, "只能用于受支持"):
+            self.build("[ref=badsize;size=40;w=100px;h=100px]")
+
+
 class CliTests(unittest.TestCase):
     def test_piped_stdout_and_stderr_are_utf8_under_legacy_locale(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1711,7 +1922,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Layerlang v0.7 渲染器")
+    parser = argparse.ArgumentParser(description="Layerlang v0.8 渲染器")
     subparsers = parser.add_subparsers(dest="command", required=True)
     render_parser = subparsers.add_parser("render")
     render_parser.add_argument("input")
@@ -1735,6 +1946,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             loader.loadTestsFromTestCase(ReportTests),
             loader.loadTestsFromTestCase(ConstantsTests),
             loader.loadTestsFromTestCase(LiningTests),
+            loader.loadTestsFromTestCase(ParameterTests),
             loader.loadTestsFromTestCase(CliTests),
             loader.loadTestsFromTestCase(ErrorContextTests),
         ])

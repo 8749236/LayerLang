@@ -1,15 +1,15 @@
 ---
 name: layerlang-mvp
-description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.7 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, child-frame lining, and resource/code/parent_rect inspection reports. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, parameterized refs, cross-layer property access, user-defined sugar, or photorealistic artwork; those are outside v0.7.
+description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.8 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, child-frame lining, typed ref parameters, and resource/code/parent_rect inspection reports. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, cross-layer property access, user-defined sugar, or photorealistic artwork; those are outside v0.8.
 ---
 
-# Layerlang v0.7
+# Layerlang v0.8
 
-使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.7 在常量与 `px` 之上加入 lining 子级坐标修正，并用 `parent_rect` 报告每个节点实际收到的父矩形。
+使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.8 加入三类 ref 参数：文字、颜色和尺寸；常量、lining 与 `parent_rect` 语义保持不变。
 
 ## 准备
 
-1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_7.md](references/layerlang_v0_7.md)。
+1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_8.md](references/layerlang_v0_8.md)。
 2. 使用 [scripts/layerlang_mvp.py](scripts/layerlang_mvp.py)，不要为每次任务重新实现解析器。
 3. 确保 Python 环境具有 Pillow；文字和图片会统一转换为内嵌 PNG。
 4. 只使用当前规范，不要把“已废弃方案”或“未来脑洞”当成可用语法。
@@ -59,7 +59,7 @@ description: Generate, edit, render, and inspect deterministic SVG graphics with
 - 使用 `@name` 引用完整值，使用 `2@name` 或 `1/2@name` 取倍数；只能引用当前文件中**先前声明**的常量。
 - `px` 是当前画布的绝对坐标单位：`24px` 就是 24 个画布单位，不随父容器比例缩放。其他整数单位仍按百分比解释，例如 `24pw` 是父宽度的 24%。
 - 常量可以保存 `pw/ph/w/h/a/px` 尺寸，使用时仍按属性检查单位权限；普通 primitive 和 ref 的 `w/h` 必须大于零。
-- ref 定义只读自己文件里的常量，不读取调用方常量。没有跨文件常量、颜色 token、通用算术或参数传递。
+- ref 定义只读自己文件里的常量，不自动读取调用方常量；调用方可以把常量解析后显式传给尺寸参数。没有跨文件常量、颜色 token 或通用算术。
 - 相对关系仍优先用 `pw/ph/w/h`；明确需要固定尺寸、像素对齐或 UI 间距时使用 `px`，不要自动混写猜测意图。
 
 ## 使用文字与引号
@@ -192,11 +192,51 @@ lining=1px,2px,3px,4px       上、右、下、左
 
 - ref 必须显式提供 `w/h`，只允许 `pw/ph`；没有 `a` 固有尺寸。
 - 实例最终矩形先应用自身 lining，再作为被引用文档中所有顶层节点的 parent；实例外框和自身内容不内缩。每个实例独立求值，不共享几何状态。
-- 调用方不能读取或修改组件内部属性，也不能在调用点传参数。
+- 调用方不能任意读取或覆盖组件内部属性，只能提供定义中 `$name` 显式声明的实参，见下一节。
 - ref 自身可以有 `fill` 和 `|` 子节点；顺序为 `fill → 组件展开内容 → 自有子节点`。
 - 定义名不能包含路径分隔符或 `@`，不能是 `.` 或 `..`，也不能带 `.txt` 后缀。
 - 图层路径使用 `@定义名` 标记展开边界，例如 `0@card/0/0`。
 - 直接和间接循环、超过 32 层引用或超过 10000 个求值节点都会报错。
+
+## 使用 ref 参数
+
+组件定义中的未加引号、独占整个属性值的 `$name` 是参数声明与使用点；`"$name"` 永远是普通文字，不做插值：
+
+```text
+# event_row.txt
+[
+    w=100pw; h=100ph; fill=$row_fill
+    |
+    text=$kind; size=16; x=24px; y=12px; color=$kind_color
+    |
+    text=$detail; size=18; x=240px; y=12px; color=#c9d1d9
+]
+```
+
+调用点全部显式提供：
+
+```text
+[
+    ref=event_row;
+    kind="BRANCH"; detail="true · 17/42";
+    kind_color=#d2a8ff; row_fill=#132238;
+    w=600px; h=64px
+]
+```
+
+三类参数与目标白名单：
+
+| 类型 | 允许进入的属性 | 校验 |
+|---|---|---|
+| 文字 | `text` | 使用调用点解码后的完整字符串 |
+| 颜色 | `color、fill` | 必须是 `#RRGGBB` |
+| 尺寸 | `x、y、w、h、xo、yo、ll、lr、lt、lb` | 使用现有 dimension／constant 文法与单位权限 |
+
+- 参数名使用小写字母、数字和下划线，必须以小写字母开头；不能与内置属性重名。定义中出现哪些参数，调用点就必须全部提供，多传、漏传都报错。
+- 无默认值、无可选参数、无嵌套参数转发。嵌套 ref 可以传静态字面值，但不能写 `label=$label` 继续向上传递。
+- 尺寸实参先在调用方文件中解析，`@pad` 只读调用方常量；随后作为精确 Dimension 传给组件，不做文本预处理或递归替换。
+- `size/font/image/ref/anchor` 和 `lining=` 简写不接受参数。`active` 条件绘制、slots、repeat 和通用表达式仍不支持。
+- ref 实例的 `content_metadata.parameters` 保存实参及类型；内部节点的 `code` 仍指向组件定义，实例 `code` 指向调用点。
 
 ## 修改与溯源
 
@@ -240,7 +280,7 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 管道输出；sub
 python3 scripts/layerlang_mvp.py self-test
 ```
 
-确保 72 项自测全部通过。
+确保 80 项自测全部通过。
 
 ## 绝对像素与复杂局部
 
@@ -254,7 +294,7 @@ python3 scripts/layerlang_mvp.py self-test
 - 普通 primitive 和 ref 没有固有尺寸，不要使用 `a`；ref 必须显式写 `w/h`。
 - 引号只在值首生效；不要发明单引号、`\n` 或其他转义。
 - ref 报错时沿 `@定义名` 路径和引用链定位，不要通过暴露内部属性绕开封装。
-- 用户要求表达式、裁剪、多行富文本、URL 图片、参数化 ref、跨层属性访问、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.7，不要发明临时语法。
+- 用户要求表达式、裁剪、多行富文本、URL 图片、跨层属性访问、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.8，不要发明临时语法。
 
 ## 视觉反馈
 
