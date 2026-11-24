@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Layerlang v0.6：矩形、文字、本地图片、本地引用、文件内常量与可溯源图层检查。
+"""Layerlang v0.7：矩形、文字、本地图片、本地引用、文件内常量、lining 与可溯源图层检查。
 
 依赖：Python 标准库与 Pillow。
   python3 layerlang_mvp.py self-test
@@ -31,7 +31,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-SPEC_VERSION = "0.6"
+SPEC_VERSION = "0.7"
 HERE = Path(__file__).resolve().parent
 
 
@@ -348,7 +348,7 @@ def outside_status(rect: Rect, canvas: Rect) -> str:
 LINUX_DEFAULT_FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 DIMENSION_RE = re.compile(r"^(-?\d+(?:/\d+)?)(pw|ph|w|h|a|px)$")
 CONSTANT_RE = re.compile(r"^(?:(-?\d+(?:/\d+)?)?)@([A-Za-z][A-Za-z0-9]*)$")
-COMMON_ATTRS = {"x", "y", "w", "h", "xo", "yo", "anchor", "fill"}
+COMMON_ATTRS = {"x", "y", "w", "h", "xo", "yo", "anchor", "fill", "lining", "ll", "lr", "lt", "lb"}
 TEXT_ATTRS = {"text", "font", "size", "color"}
 IMAGE_ATTRS = {"image"}
 REF_ATTRS = {"ref"}
@@ -434,9 +434,27 @@ def desugar_anchor(value: str) -> dict[str, Dimension]:
     return dimensions
 
 
+def desugar_lining(value: str) -> dict[str, str]:
+    """把 1/2/4 值 lining 展开为四边属性，不读取场景状态。"""
+    parts = [part.strip() for part in value.split(",")]
+    if any(not part for part in parts):
+        raise ValueError("lining 的逗号之间必须有尺寸")
+    if len(parts) == 1:
+        values = dict(zip(("lt", "lr", "lb", "ll"), parts * 4))
+    elif len(parts) == 2:
+        vertical, horizontal = parts
+        values = {"lt": vertical, "lr": horizontal, "lb": vertical, "ll": horizontal}
+    elif len(parts) == 4:
+        values = dict(zip(("lt", "lr", "lb", "ll"), parts))
+    else:
+        raise ValueError("lining 只接受 1、2 或 4 个逗号分隔尺寸；顺序为上、右、下、左")
+    return values
+
+
 @dataclass
 class Node:
     rect: object
+    parent_rect: object
     path: str
     fill: Optional[str]
     kind: str
@@ -446,6 +464,7 @@ class Node:
     intrinsic: Optional[tuple[int, int]] = None
     metadata: dict[str, object] = field(default_factory=dict)
     code: dict[str, object] = field(default_factory=dict)
+    child_rect: object = None
     expansion: list["Node"] = field(default_factory=list)
     children: list["Node"] = field(default_factory=list)
 
@@ -629,7 +648,25 @@ def validate_common(spec, source: str, kind: str, constants: dict[str, Dimension
                 raise LangError(f"{label} primitive 缺少 {required}{suffix}", source, spec.position)
         dimensions["w"] = parse_dimension(attrs["w"], source, width_units, constants)
         dimensions["h"] = parse_dimension(attrs["h"], source, height_units, constants)
-    return {"fill": fill, "dimensions": dimensions}
+    lining_values: dict[str, str] = {}
+    if "lining" in attrs:
+        lining = attrs["lining"]
+        try:
+            expanded = desugar_lining(lining.value)
+        except ValueError as error:
+            raise LangError(str(error), source, lining.position) from error
+        conflicts = set(expanded) & set(attrs)
+        if conflicts:
+            raise LangError(f"lining 展开属性与手写属性冲突：{sorted(conflicts)}", source, lining.position)
+        lining_values.update(expanded)
+    for name in ("ll", "lr", "lt", "lb"):
+        if name in attrs:
+            lining_values[name] = attrs[name].value
+    lining: dict[str, Dimension] = {}
+    for name, value in lining_values.items():
+        allowed_units = {"pw", "w", "px"} if name in {"ll", "lr"} else {"ph", "h", "px"}
+        lining[name] = parse_dimension(Attr(name, value, attrs[name].position if name in attrs else attrs["lining"].position), source, allowed_units, constants)
+    return {"fill": fill, "dimensions": dimensions, "lining": lining}
 
 
 def _evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Dimension], context: RefContext) -> Node:
@@ -645,6 +682,7 @@ def _evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Di
         raise LangError(f"{kind} 是类型头，必须是第一个属性", source, spec.attrs[kind].position)
     common = validate_common(spec, source, kind, constants)
     dimensions = common["dimensions"]
+    lining = common["lining"]
     current_dir = context.stack[-1].parent if context.stack else context.resource_dir
     current_source = str(context.stack[-1]) if context.stack else None
     code = make_code_location(source, spec.position, spec.end, current_source)
@@ -704,7 +742,14 @@ def _evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Di
     x = parent.x + displacement("x") + displacement("xo")
     y = parent.y + displacement("y") + displacement("yo")
     rect = Rect(x, y, width, height)
-    node = Node(rect=rect, path=path, fill=common["fill"], kind=kind, text=text, resource=source_name, png=png, intrinsic=intrinsic, metadata=metadata, code=code)
+    left = lining["ll"].scale * basis(lining["ll"], width, height) if "ll" in lining else Fraction(0)
+    right = lining["lr"].scale * basis(lining["lr"], width, height) if "lr" in lining else Fraction(0)
+    top = lining["lt"].scale * basis(lining["lt"], width, height) if "lt" in lining else Fraction(0)
+    bottom = lining["lb"].scale * basis(lining["lb"], width, height) if "lb" in lining else Fraction(0)
+    child_rect = Rect(x + left, y + top, width - left - right, height - top - bottom)
+    if child_rect.w <= 0 or child_rect.h <= 0:
+        raise LangError("lining 修正后的 parent_rect 宽高必须大于零", source, spec.attrs["lining"].position if "lining" in spec.attrs else spec.position)
+    node = Node(rect=rect, parent_rect=parent, path=path, fill=common["fill"], kind=kind, text=text, resource=source_name, png=png, intrinsic=intrinsic, metadata=metadata, code=code, child_rect=child_rect)
     if kind == "ref":
         ref_name = spec.attrs["ref"].value
         if not ref_name or ref_name in {".", ".."} or "/" in ref_name or "\\" in ref_name or "@" in ref_name or ref_name.endswith(".txt"):
@@ -731,7 +776,7 @@ def _evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Di
         definition_constants = resolve_constants(document.constant_specs, definition_source)
         context.stack.append(target)
         try:
-            node.expansion = evaluate_groups(document.groups, rect, f"{path}@{ref_name}", definition_source, definition_constants, context)
+            node.expansion = evaluate_groups(document.groups, child_rect, f"{path}@{ref_name}", definition_source, definition_constants, context)
         finally:
             context.stack.pop()
         node.resource = str(target)
@@ -754,7 +799,7 @@ def evaluate_groups(groups: list[Group], parent: Rect, prefix: str, source: str,
         root_path = f"{prefix}/{root_index}" if prefix else str(root_index)
         root = evaluate_node(group.base, parent, root_path, source, constants, context)
         root.children = [
-            evaluate_node(child, root.rect, f"{root_path}/{index}", source, constants, context)
+            evaluate_node(child, root.child_rect, f"{root_path}/{index}", source, constants, context)
             for index, child in enumerate(group.children)
         ]
         roots.append(root)
@@ -793,7 +838,7 @@ def build_scene(source: str, width: int = 1200, height: int = 1200, resource_dir
 def render_svg(scene: Scene) -> str:
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{scene.width}" height="{scene.height}" viewBox="0 0 {scene.width} {scene.height}">',
-        "  <!-- Layerlang v0.6: deterministic layers; content is scaled without preserving aspect ratio. -->",
+        "  <!-- Layerlang v0.7: deterministic layers; content is scaled without preserving aspect ratio. -->",
     ]
     for index, node in enumerate(scene.layers):
         rect = node.rect
@@ -848,6 +893,9 @@ def scene_report(scene: Scene, hit_point: Optional[tuple[str, str]] = None) -> d
             }.items()},
             "rect_exact": {key: exact(value) for key, value in {
                 "x": node.rect.x, "y": node.rect.y, "w": node.rect.w, "h": node.rect.h,
+            }.items()},
+            "parent_rect": {key: exact(value) for key, value in {
+                "x": node.parent_rect.x, "y": node.parent_rect.y, "w": node.parent_rect.w, "h": node.parent_rect.h,
             }.items()},
             "outside": status,
         })
@@ -1527,6 +1575,74 @@ class ConstantsTests(unittest.TestCase):
         self.assertEqual(code["start"]["line"], 2)
 
 
+class LiningTests(unittest.TestCase):
+    def test_direct_lining_changes_only_the_child_parent(self) -> None:
+        source = "[x=100px;y=50px;w=400px;h=200px;ll=25px;lr=50px;lt=20px;lb=30px;fill=#000000|w=100pw;h=100ph;fill=#ffffff]"
+        scene = build_scene(source)
+        outer, child = scene.layers
+        self.assertEqual(outer.rect, Rect(Fraction(100), Fraction(50), Fraction(400), Fraction(200)))
+        self.assertEqual(child.rect, Rect(Fraction(125), Fraction(70), Fraction(325), Fraction(150)))
+        self.assertEqual(child.parent_rect, outer.child_rect)
+        report = scene_report(scene)
+        self.assertEqual(report["layers"][1]["parent_rect"], {"x": "125", "y": "70", "w": "325", "h": "150"})
+        self.assertEqual(report["layers"][0]["rect_exact"], {"x": "100", "y": "50", "w": "400", "h": "200"})
+
+    def test_one_two_and_four_value_forms_desugar(self) -> None:
+        cases = [
+            ("10px", Rect(Fraction(10), Fraction(10), Fraction(180), Fraction(80))),
+            ("10px,20px", Rect(Fraction(20), Fraction(10), Fraction(160), Fraction(80))),
+            ("1px,2px,3px,4px", Rect(Fraction(4), Fraction(1), Fraction(194), Fraction(96))),
+        ]
+        for value, expected in cases:
+            with self.subTest(lining=value):
+                child = build_scene(f"[w=200px;h=100px;lining={value}|w=100pw;h=100ph]").layers[1]
+                self.assertEqual(child.rect, expected)
+
+    def test_ref_expansion_and_own_children_share_lined_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "card.txt").write_text("[w=100pw;h=100ph;fill=#ffffff]", encoding="utf-8")
+            source = "[ref=card;x=100px;w=200px;h=100px;ll=20px;lr=10px;lt=5px;lb=15px|w=100pw;h=100ph]"
+            scene = build_scene(source, resource_dir=directory)
+            instance, internal, own_child = scene.layers
+            self.assertEqual(instance.rect, Rect(Fraction(100), Fraction(0), Fraction(200), Fraction(100)))
+            expected = Rect(Fraction(120), Fraction(5), Fraction(170), Fraction(80))
+            self.assertEqual(internal.rect, expected)
+            self.assertEqual(own_child.rect, expected)
+            self.assertEqual(internal.parent_rect, own_child.parent_rect)
+
+    def test_negative_lining_expands_without_clamping(self) -> None:
+        source = "[w=100px;h=100px;ll=-20px;lr=-30px;lt=-10px;lb=-40px|w=100pw;h=100ph]"
+        scene = build_scene(source)
+        self.assertEqual(scene.layers[1].rect, Rect(Fraction(-20), Fraction(-10), Fraction(150), Fraction(150)))
+        self.assertEqual(scene.layers[1].parent_rect, scene.layers[0].child_rect)
+        self.assertEqual(scene_report(scene)["outside"]["partial"], ["0/0"])
+
+    def test_nonpositive_lined_parent_is_rejected(self) -> None:
+        for source in (
+            "[w=100px;h=100px;ll=60px;lr=50px|w=100pw;h=100ph]",
+            "[w=100px;h=100px;lining=100px|w=100pw;h=100ph]",
+        ):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(LangError, "parent_rect 宽高必须大于零"):
+                    build_scene(source)
+
+    def test_constants_and_px_work_in_lining(self) -> None:
+        source = "@pad=24px\n[x=100px;w=400px;h=200px;lining=@pad|w=100pw;h=100ph]"
+        scene = build_scene(source)
+        self.assertEqual(scene.layers[1].rect, Rect(Fraction(124), Fraction(24), Fraction(352), Fraction(152)))
+
+    def test_lining_conflicts_invalid_forms_and_units_are_rejected(self) -> None:
+        with self.assertRaisesRegex(LangError, "冲突"):
+            build_scene("[w=100px;h=100px;lining=10px;ll=1px]")
+        for value in ("1px,2px,3px", "1px,,2px", "1px,2px,3px,4px,5px"):
+            with self.subTest(lining=value):
+                with self.assertRaisesRegex(LangError, "lining"):
+                    build_scene(f"[w=100px;h=100px;lining={value}]")
+        with self.assertRaisesRegex(LangError, "不允许单位 a"):
+            build_scene("[w=100px;h=100px;ll=1/2a]")
+
+
 class CliTests(unittest.TestCase):
     def test_piped_stdout_and_stderr_are_utf8_under_legacy_locale(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1595,7 +1711,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Layerlang v0.6 渲染器")
+    parser = argparse.ArgumentParser(description="Layerlang v0.7 渲染器")
     subparsers = parser.add_subparsers(dest="command", required=True)
     render_parser = subparsers.add_parser("render")
     render_parser.add_argument("input")
@@ -1618,6 +1734,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             loader.loadTestsFromTestCase(AnchorTests),
             loader.loadTestsFromTestCase(ReportTests),
             loader.loadTestsFromTestCase(ConstantsTests),
+            loader.loadTestsFromTestCase(LiningTests),
             loader.loadTestsFromTestCase(CliTests),
             loader.loadTestsFromTestCase(ErrorContextTests),
         ])

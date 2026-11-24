@@ -1,10 +1,10 @@
-# 图层语言（Layerlang）v0.6 行为说明
+# 图层语言（Layerlang）v0.7 行为说明
 
 - 状态：按当前实现固化，供检索；不是开发流程门禁。
 - 对应实现：`layerlang-mvp/scripts/layerlang_mvp.py`。
 - 运行依赖：Python 与 Pillow。
-- 验收基线：65 项自测全部通过。
-- 相对 v0.5 的变化：加入文件内具名尺寸常量与显式 `px` 绝对像素单位。不包含内容参数、颜色 token、通用表达式或 lining。
+- 验收基线：72 项自测全部通过。
+- 相对 v0.6 的变化：加入 `ll/lr/lt/lb` 与 1／2／4 值 lining，只修正子级和 ref 展开的 parent；新增精确 `parent_rect` 报告。不包含内容参数、颜色 token 或通用表达式。
 
 ## 1. 当前模型
 
@@ -22,7 +22,7 @@ Layerlang 主要服务于快速原型验证，而不是完整美术产出：agen
 
 ## 2. 非目标
 
-v0.6 明确不支持：
+v0.7 明确不支持：
 
 - 跨 layer 属性读取或写入、参数化 ref；
 - 通用表达式、函数、条件、循环；
@@ -60,6 +60,7 @@ v0.6 明确不支持：
 | `w、h` | 当前 layer 的最终宽度与高度 |
 | `xo、yo` | 求出尺寸与基础位置后的修正，默认零 |
 | `anchor` | 可选固定布局糖；按轴 desugar 为位置属性 |
+| `lining、ll、lr、lt、lb` | 可选子级 parent 修正；不改变当前节点外框 |
 | `fill` | 当前 layer 的背景填充，省略时透明 |
 
 所有类型按以下顺序绘制：
@@ -172,6 +173,33 @@ anchor 适用于所有 primitive 类型，offset 继续使用当前节点最终�
 被引用文件是完整 Layerlang 文档，可以包含多个顶层 group，也可以继续使用 text/image/ref。ref 实例必须显式提供 `w/h`，只允许 `pw/ph`；没有固有尺寸，不能省略，也不能使用 `a`。
 
 调用方只能确定实例矩形、公共背景和实例子节点。调用方不能读取或修改被引用对象的内部属性，也不能通过调用点传入参数。
+
+### 3.8 lining 子级坐标修正
+
+lining 只改变子节点和 ref 展开内容收到的 parent，不改变当前节点的 `rect`、fill、text/image 内容、命中矩形、绘制顺序或兄弟节点。
+
+底层属性为 `ll/lr/lt/lb`，分别对应左、右、上、下。`ll/lr` 接受 `pw/w/px`，`lt/lb` 接受 `ph/h/px`，也支持当前文件常量。`pw/ph` 读取当前节点的 parent，`w/h` 读取当前节点已经求出的外框。
+
+固定简写按逗号分隔：
+
+```text
+lining=24px                  四边相同
+lining=24px,48px             垂直 24px，水平 48px
+lining=1px,2px,3px,4px       上、右、下、左
+```
+
+简写是纯 desugar，展开为四边 key。展开 key 与输入显式属性的交集必须为空，例如 `lining=24px;ll=1px` 冲突。零值同样占 key，属性顺序不影响结果。
+
+设当前外框为 `rect=(x,y,w,h)`，子级实际收到的矩形为：
+
+```text
+parent_rect.x = x + ll
+parent_rect.y = y + lt
+parent_rect.w = w - ll - lr
+parent_rect.h = h - lt - lb
+```
+
+正值内缩，负值外扩，不 clamp，也不推开兄弟节点。修正后的 `parent_rect.w/h` 必须严格大于零，否则在携带 lining 的节点处明确报错。ref 实例外框先按调用方 parent 求出，再用自身 lining 得到展开顶层节点的 parent。
 
 ## 4. 引号字符串与词法
 
@@ -332,16 +360,17 @@ SVG 中的内容使用 `preserveAspectRatio="none"`。
 2. 根据 parent 或固有尺寸计算当前 `w、h`；
 3. 根据 parent 和 anchor desugar 计算基础 `x、y`；
 4. 使用 parent 或当前尺寸计算 `xo、yo`；
-5. 得到最终矩形；
-6. 依次绘制 `fill`、当前内容或展开内容、自有子节点。
+5. 得到当前节点最终矩形；
+6. 应用 lining 得到子级 `parent_rect`，并检查其宽高严格大于零；
+7. 依次绘制 `fill`、当前内容或展开内容、自有子节点。
 
-子节点继承父节点应用 offset 后的最终矩形。后绘制的内容覆盖先绘制的内容。内部几何使用精确分数，只在输出时转换为十进制。
+子节点继承父节点应用 lining 后的矩形；未写 lining 时与父节点最终矩形相同。后绘制的内容覆盖先绘制的内容。内部几何使用精确分数，只在输出时转换为十进制。
 
 实现不生成主动裁剪用的 `clipPath`。子节点和 ref 内部节点可以离开父矩形或全局画布，完整几何仍保留在报告中。
 
 ## 8. ref 展开与封装
 
-ref 必须先求出实例最终矩形，再展开定义。被引用文档中的每个顶层 group 都以这个实例矩形作为 parent，按文档顺序独立求值。
+ref 必须先求出实例最终矩形，再应用实例自身 lining，最后展开定义。被引用文档中的每个顶层 group 都以 lining 修正后的矩形作为 parent，按文档顺序独立求值。
 
 同一个定义可以被多次引用。解析结果可以缓存，但节点几何、路径、源范围和子节点必须按实例重新创建。组件内部不能读取调用方属性，调用方也不能读取组件内部属性，因此 parent 在展开前始终确定。
 
@@ -376,7 +405,7 @@ ref fill → ref 定义展开内容 → ref 自有子节点
 
 JSON 报告包含：
 
-- `spec_version`，当前为 `0.6`；
+- `spec_version`，当前为 `0.7`；
 - 全局画布尺寸；
 - 节点序号、路径与 `kind`；
 - `fill、text`；
@@ -386,10 +415,11 @@ JSON 报告包含：
 - `content_metadata`；
 - `scale`；
 - `rect_px` 与 `rect_exact`；
+- `parent_rect`：当前节点求值时实际收到的父矩形，字段为 `x/y/w/h` 的精确分数字符串；顶层为画布，普通子级和 ref 展开节点包含 lining 修正；
 - `outside` 越界状态；
 - 可选 `hit` 命中结果。
 
-v0.6 沿用 `resource/code` 报告 schema；常量与 `px` 求值不增加、删除或改名任何报告字段。
+v0.7 在 `resource/code` 之外增加 `parent_rect`，用于直接检查 lining 和 ref 展开时的几何输入。
 
 ### 9.2 resource 与 code：资源产地和源码范围
 
@@ -473,6 +503,7 @@ scale = [sx,sy]
 - 类型头不在第一位、同时出现多个类型头；
 - 普通 primitive 或 ref 缺少 `w/h`；
 - 非法 `size`、非法 anchor 或 anchor 与位置属性冲突；
+- 非法 lining、lining 展开冲突，以及修正后非正的 parent 宽高；
 - 裸数字、旧版前缀单位、非法单位、非法分数、零分母；
 - 重复、前向或未知的常量引用，以及跨文件读取常量；
 - 非正 `w/h`；
@@ -502,7 +533,7 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 上被 subprocess 
 
 ## 13. 验收基线
 
-当前 65 项自测由十一组构成：
+当前 72 项自测由十二组构成：
 
 - 15 项矩形回归：既有几何、顺序、越界、命中和错误处理，并逐一拒绝 `pw/ph/w/h/a` 旧前缀写法；
 - 11 项文字测试：固有尺寸、显式缩放、默认字号、填充顺序和错误处理；
@@ -513,6 +544,7 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 上被 subprocess 
 - 5 项 anchor 测试：16 个组合的最终矩形、5 个短形式别名、未占用轴手写与顺序无关、完整 key 冲突、非法和重复 anchor；
 - 4 项报告测试：主文档与 ref 的 `code`、主资源与旧字段移除、双轴 `scale`，以及 CRLF 主文档和 ref 的原始 offset 切片；
 - 6 项常量测试：直接 `px`、派生倍数、ref 文件隔离、非法声明与引用、单位权限，以及常量头下的 CRLF 源码范围；
+- 7 项 lining 测试：直接四边、1／2／4 值展开、ref 与自有子级共享 parent、负值外扩、非正 parent 拒绝、常量与 `px`，以及冲突和非法输入；
 - 1 项 CLI 测试：强制遗留区域编码时，管道 stdout/stderr 仍按 UTF-8 输出；
 - 1 项错误上下文测试：嵌套 ref 内的资源失败包含 `code`、定义文件、行列和完整节点路径。
 

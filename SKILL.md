@@ -1,15 +1,15 @@
 ---
 name: layerlang-mvp
-description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.6 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, and resource/code inspection reports. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, parameterized refs, cross-layer property access, user-defined sugar, or photorealistic artwork; those are outside v0.6.
+description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.7 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, child-frame lining, and resource/code/parent_rect inspection reports. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, parameterized refs, cross-layer property access, user-defined sugar, or photorealistic artwork; those are outside v0.7.
 ---
 
-# Layerlang v0.6
+# Layerlang v0.7
 
-使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.6 在 v0.5 后缀尺寸文法之上加入文件内常量和显式 `px`，anchor、ref 与 `resource/code` 报告语义保持不变。
+使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.7 在常量与 `px` 之上加入 lining 子级坐标修正，并用 `parent_rect` 报告每个节点实际收到的父矩形。
 
 ## 准备
 
-1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_6.md](references/layerlang_v0_6.md)。
+1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_7.md](references/layerlang_v0_7.md)。
 2. 使用 [scripts/layerlang_mvp.py](scripts/layerlang_mvp.py)，不要为每次任务重新实现解析器。
 3. 确保 Python 环境具有 Pillow；文字和图片会统一转换为内嵌 PNG。
 4. 只使用当前规范，不要把“已废弃方案”或“未来脑洞”当成可用语法。
@@ -90,17 +90,19 @@ description: Generate, edit, render, and inspect deterministic SVG graphics with
 
 它们分别等价于 `x=100pw;xo=-100w` 与 `y=100ph;yo=-100h`，只占用对应轴，另一轴仍可手写。对齐相对**直接父矩形**，目标是 layer 矩形边缘；文字位图的字体度量不保证视觉墨迹也贴边。
 
-需要给 anchor 留白时，先显式缩小或移动父容器，不要在 anchor 占用的轴上再写 `x/y/xo/yo`：
+需要给 anchor 留白时，在父节点上使用 lining，不要在 anchor 占用的轴上再写 `x/y/xo/yo`：
 
 ```text
+@pad=24px
+
 [
-    w=263/270pw; h=1/12ph; anchor=top-center
+    w=263/270pw; h=1/12ph; anchor=top-center; lining=@pad
     |
     text="状态"; anchor=right
 ]
 ```
 
-这里文字对齐的是内层容器的右边，不是画布右边。容器比父矩形少 `7/270pw`，居中后由左右两侧均分；如果只需要一侧留白，就用 `x/w` 明确容器的位置和宽度。具体像素边距仍需先换算为相对比例，anchor 本身不支持后间距。
+这里文字对齐的是 lining 修正后的父矩形右边，不是容器外框或画布右边。只需单边修正时写 `ll/lr/lt/lb`，例如 `lr=24px` 只缩右边。
 
 整数 `N` 表示 `N/100`，分数 `a/b` 直接表示 `a/b`，不要混淆：
 
@@ -156,12 +158,40 @@ anchor=null-null;x=1/2pw         合法，anchor 是空操作
 
 属性顺序不影响冲突或求值。anchor 不支持后间距，也不是用户自定义 sugar 或多个 sugar 组合机制。
 
+## 使用 lining 调整子级 parent
+
+lining 只改变子节点和 ref 展开内容收到的 parent，不改变当前节点的 `rect`、fill、text/image 内容、命中矩形或兄弟节点：
+
+```text
+@pad=24px
+
+[
+    w=480px; h=240px; lining=@pad; fill=#93c5fd
+    |
+    w=100pw; h=100ph; fill=#ffffff
+]
+```
+
+上例外框仍是 `480×240`，子节点收到的是 `432×192` 的内部矩形。底层属性为 `ll/lr/lt/lb`，分别对应左、右、上、下；`ll/lr` 接受 `pw/w/px`，`lt/lb` 接受 `ph/h/px`，也支持当前文件常量。
+
+固定简写按逗号分隔：
+
+```text
+lining=24px                  四边相同
+lining=24px,48px             垂直 24px，水平 48px
+lining=1px,2px,3px,4px       上、右、下、左
+```
+
+`lining` 展开哪些 key，就占用哪些 key；同名手写属性会冲突。例如 `lining=24px;ll=1px` 报错。正值内缩，负值外扩；不 clamp，也不推开兄弟节点。修正后的 `parent_rect.w/h` 必须严格大于零。
+
+报告中的 `parent_rect` 是当前节点求值时实际收到的父矩形，使用精确分数字符串。顶层节点是画布，ref 实例使用调用方 parent，ref 展开节点和 `|` 子节点使用 lining 修正后的矩形。
+
 ## 使用 ref 组件
 
 `ref=card` 读取当前定义文件同目录的 `card.txt`。被引用文件是完整 Layerlang 文档，可以包含多个顶层 group、text/image 或下一层 ref。
 
 - ref 必须显式提供 `w/h`，只允许 `pw/ph`；没有 `a` 固有尺寸。
-- 实例最终矩形是被引用文档中所有顶层节点的 parent。每个实例独立求值，不共享几何状态。
+- 实例最终矩形先应用自身 lining，再作为被引用文档中所有顶层节点的 parent；实例外框和自身内容不内缩。每个实例独立求值，不共享几何状态。
 - 调用方不能读取或修改组件内部属性，也不能在调用点传参数。
 - ref 自身可以有 `fill` 和 `|` 子节点；顺序为 `fill → 组件展开内容 → 自有子节点`。
 - 定义名不能包含路径分隔符或 `@`，不能是 `.` 或 `..`，也不能带 `.txt` 后缀。
@@ -172,7 +202,7 @@ anchor=null-null;x=1/2pw         合法，anchor 是空操作
 
 1. 阅读源文本和图层报告，按结构路径定位实例，按 `code` 找到应编辑的源码范围。
 2. `resource` 是主内容资源：image 为图片路径，ref 为组件定义路径，rect/text 为 `null`；字体等辅助资源留在 `content_metadata`。
-3. `code.file` 是源码 `.txt` 文件，`code.start/end` 是半开字符范围，不保存代码正文。ref 实例指向调用点，内部节点指向各自定义；重复实例路径不同，但内部节点通常共享同一个 `code`。
+3. `code.file` 是源码 `.txt` 文件，`code.start/end` 是半开字符范围，不保存代码正文。ref 实例指向调用点，内部节点指向各自定义；重复实例路径不同，但内部节点通常共享同一个 `code`。`parent_rect` 则记录几何求值输入，lining 排查时同时阅读它与 `rect_px/rect_exact`。
 4. offset 从 0 开始，行列从 1 开始；offset 对应原始文本字符，不是 UTF-8 字节。CLI 保留 CRLF，可用 `raw_source[code.start.offset:code.end.offset]` 精确取出 primitive 属性文本。
 5. 纯内存构建且未提供路径时，`code.file=null`，offset 和行列仍保留。只修改目标属性、primitive 或组件定义，不重排顶层 group、兄弟节点或 `|` 分段。
 6. 重新渲染，检查目标矩形、相邻节点和所有相关展开路径。
@@ -210,7 +240,7 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 管道输出；sub
 python3 scripts/layerlang_mvp.py self-test
 ```
 
-确保 65 项自测全部通过。
+确保 72 项自测全部通过。
 
 ## 绝对像素与复杂局部
 
@@ -224,7 +254,7 @@ python3 scripts/layerlang_mvp.py self-test
 - 普通 primitive 和 ref 没有固有尺寸，不要使用 `a`；ref 必须显式写 `w/h`。
 - 引号只在值首生效；不要发明单引号、`\n` 或其他转义。
 - ref 报错时沿 `@定义名` 路径和引用链定位，不要通过暴露内部属性绕开封装。
-- 用户要求表达式、裁剪、多行富文本、URL 图片、参数化 ref、跨层属性访问、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.6，不要发明临时语法。
+- 用户要求表达式、裁剪、多行富文本、URL 图片、参数化 ref、跨层属性访问、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.7，不要发明临时语法。
 
 ## 视觉反馈
 
