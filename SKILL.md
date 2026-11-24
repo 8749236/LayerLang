@@ -1,11 +1,11 @@
 ---
 name: layerlang-mvp
-description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.8 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, child-frame lining, typed ref parameters, and resource/code/parent_rect inspection reports. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, cross-layer property access, user-defined sugar, or photorealistic artwork; those are outside v0.8.
+description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.8 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, child-frame lining, typed ref parameters, and resource/code/parent_rect inspection reports and filtered CLI inspection. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, cross-layer property access, user-defined sugar, or photorealistic artwork; those are outside v0.8.
 ---
 
 # Layerlang v0.8
 
-使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.8 加入三类 ref 参数：文字、颜色和尺寸；常量、lining 与 `parent_rect` 语义保持不变。
+使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.8 加入三类 ref 参数：文字、颜色和尺寸；v0.8.1 修复参数定义错误路径，并加入 inspect 摘要与过滤命令。
 
 ## 准备
 
@@ -272,6 +272,23 @@ python3 scripts/layerlang_mvp.py render 输入.txt \
 
 阅读 `outside.partial` 和 `outside.full` 定位越界对象。越界不是错误，不要自动 clamp，也不要添加裁剪。命中结果包含容器和 ref 实例，按从底到顶排列；几何命中不等于该点一定有不透明像素。
 
+使用 inspect 先取摘要，再按需要过滤，不要默认阅读整份大型 JSON：
+
+```bash
+# 只看节点、类型、参数实例和越界摘要
+python3 scripts/layerlang_mvp.py inspect 输入.txt --width 1200 --height 1200
+
+# 只看越界节点
+python3 scripts/layerlang_mvp.py inspect 输入.txt --outside
+
+# 按文字、类型或子树过滤
+python3 scripts/layerlang_mvp.py inspect 输入.txt --text "BRANCH"
+python3 scripts/layerlang_mvp.py inspect 输入.txt --kind ref
+python3 scripts/layerlang_mvp.py inspect 输入.txt --path "0@card"
+```
+
+无过滤时 `layers` 为空，只输出摘要；有过滤时返回匹配图层的完整报告。`--path` 包含指定实例及其展开子树，`--outside` 合并 partial/full。生成器产物的 `code` 仍指向生成的 `.txt`，不自动指向生成器源码。
+
 CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 管道输出；subprocess 调用方应按 UTF-8 解码，不要使用系统区域编码。
 
 修改渲染器后运行：
@@ -280,7 +297,7 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 管道输出；sub
 python3 scripts/layerlang_mvp.py self-test
 ```
 
-确保 80 项自测全部通过。
+确保 84 项自测全部通过。
 
 ## 绝对像素与复杂局部
 

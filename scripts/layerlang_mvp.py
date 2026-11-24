@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal, localcontext
 from fractions import Fraction
@@ -473,8 +474,8 @@ def substitute_document(document: ParsedDocument, values: dict[str, ParameterVal
     return ParsedDocument(groups, document.constant_specs)
 
 
-def bind_parameters(document: ParsedDocument, attrs: dict[str, Attr], source: str, constants: dict[str, Dimension], ref_attr: Attr, definition_source: str) -> tuple[dict[str, ParameterValue], ParsedDocument]:
-    expected = infer_parameters(document, definition_source)
+def bind_parameters(document: ParsedDocument, attrs: dict[str, Attr], source: str, constants: dict[str, Dimension], ref_attr: Attr, definition_source: str, expected: Optional[dict[str, str]] = None) -> tuple[dict[str, ParameterValue], ParsedDocument]:
+    expected = infer_parameters(document, definition_source) if expected is None else expected
     reserved = COMMON_ATTRS | TEXT_ATTRS | IMAGE_ATTRS | REF_ATTRS
     for attr in attrs.values():
         if attr.name in reserved:
@@ -814,8 +815,13 @@ def _evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Di
                 raise
             context.cache[target] = (definition_source, document)
         definition_source, document = context.cache[target]
-        parameter_names = set(infer_parameters(document, definition_source))
-        parameter_values, ref_document = bind_parameters(document, spec.attrs, source, constants, spec.attrs["ref"], definition_source)
+        try:
+            expected = infer_parameters(document, definition_source)
+        except LangError as error:
+            error.source_path = str(target)
+            raise
+        parameter_names = set(expected)
+        parameter_values, ref_document = bind_parameters(document, spec.attrs, source, constants, spec.attrs["ref"], definition_source, expected)
         definition_constants = resolve_constants(document.constant_specs, definition_source)
     common = validate_common(spec, source, kind, constants, parameter_names)
     dimensions = common["dimensions"]
@@ -1854,6 +1860,45 @@ class ParameterTests(unittest.TestCase):
             self.build("[ref=badsize;size=40;w=100px;h=100px]")
 
 
+class InspectTests(unittest.TestCase):
+    def run_inspect(self, source: str, *arguments: str, width: int = 100, height: int = 100, refs: bool = False) -> dict[str, object]:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            if refs:
+                (directory / "card.txt").write_text("[text=hello]", encoding="utf-8")
+            path = directory / "main.txt"
+            path.write_text(source, encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable, str(HERE / "layerlang_mvp.py"), "inspect", str(path),
+                    "--width", str(width), "--height", str(height), *arguments,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+            return json.loads(completed.stdout.decode("utf-8"))
+
+    def test_summary_counts_kinds_and_outside_without_dumping_layers(self) -> None:
+        report = self.run_inspect("[w=100px;h=100px|text=hello][x=200px;w=10px;h=10px]")
+        self.assertEqual(report["summary"]["layers"], 3)
+        self.assertEqual(report["summary"]["kinds"], {"rect": 2, "text": 1})
+        self.assertEqual(report["summary"]["outside"], {"partial": [], "full": ["1"]})
+        self.assertEqual(report["layers"], [])
+
+    def test_text_filter_returns_only_matching_text_layers(self) -> None:
+        report = self.run_inspect("[text=hello][text=world]", "--text", "hello")
+        self.assertEqual([layer["text"] for layer in report["layers"]], ["hello"])
+
+    def test_kind_and_path_filters_include_ref_subtree(self) -> None:
+        source = "[ref=card;w=100px;h=100px][text=hello]"
+        by_kind = self.run_inspect(source, "--kind", "ref", refs=True)
+        self.assertEqual([layer["path"] for layer in by_kind["layers"]], ["0"])
+        by_path = self.run_inspect(source, "--path", "0", refs=True)
+        self.assertEqual([layer["path"] for layer in by_path["layers"]], ["0", "0@card/0"])
+
+
 class CliTests(unittest.TestCase):
     def test_piped_stdout_and_stderr_are_utf8_under_legacy_locale(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1916,6 +1961,52 @@ class ErrorContextTests(unittest.TestCase):
             self.assertIn("card.txt", str(error))
             self.assertIn("第 1 行", str(error))
 
+    def test_parameter_definition_error_points_to_definition_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            bad = directory / "bad.txt"
+            bad.write_text("[text=$w]", encoding="utf-8")
+            main = directory / "main.txt"
+            source = "[ref=bad;w=100px;h=100px]"
+            main.write_text(source, encoding="utf-8")
+            with self.assertRaises(LangError) as caught:
+                build_scene(source, resource_dir=directory, source_path=main)
+            self.assertEqual(caught.exception.source_path, str(bad.resolve()))
+            self.assertIn("内置属性冲突", caught.exception.message)
+
+
+def inspect_report(scene: Scene, text: Optional[str] = None, kind: Optional[str] = None, path: Optional[str] = None, outside: bool = False) -> dict[str, object]:
+    report = scene_report(scene)
+    layers = report["layers"]
+    kinds = Counter(layer["kind"] for layer in layers)
+    summary = {
+        "layers": len(layers),
+        "kinds": dict(sorted(kinds.items())),
+        "parameterized_refs": sum(1 for layer in layers if layer["kind"] == "ref" and layer["content_metadata"] and layer["content_metadata"].get("parameters")),
+        "outside": report["outside"],
+    }
+    filters = {"text": text, "kind": kind, "path": path, "outside": outside}
+
+    def matches(layer: dict[str, object]) -> bool:
+        if text is not None and text not in (layer["text"] or ""):
+            return False
+        if kind is not None and layer["kind"] != kind:
+            return False
+        if path is not None and not (layer["path"] == path or layer["path"].startswith(path + "/") or layer["path"].startswith(path + "@")):
+            return False
+        if outside and layer["outside"] == "inside":
+            return False
+        return True
+
+    selected = [layer for layer in layers if matches(layer)] if any((text is not None, kind is not None, path is not None, outside)) else []
+    return {
+        "spec_version": report["spec_version"],
+        "canvas": report["canvas"],
+        "summary": summary,
+        "filters": filters,
+        "layers": selected,
+    }
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     for stream in (sys.stdout, sys.stderr):
@@ -1932,6 +2023,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     render_parser.add_argument("--layers", required=True)
     render_parser.add_argument("--hit", nargs=2, metavar=("X", "Y"))
     subparsers.add_parser("self-test")
+    inspect_parser = subparsers.add_parser("inspect")
+    inspect_parser.add_argument("input")
+    inspect_parser.add_argument("--width", type=int, default=1200)
+    inspect_parser.add_argument("--height", type=int, default=1200)
+    inspect_parser.add_argument("--text")
+    inspect_parser.add_argument("--kind", choices=("rect", "text", "image", "ref"))
+    inspect_parser.add_argument("--path")
+    inspect_parser.add_argument("--outside", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "self-test":
         loader = unittest.defaultTestLoader
@@ -1947,6 +2046,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             loader.loadTestsFromTestCase(ConstantsTests),
             loader.loadTestsFromTestCase(LiningTests),
             loader.loadTestsFromTestCase(ParameterTests),
+            loader.loadTestsFromTestCase(InspectTests),
             loader.loadTestsFromTestCase(CliTests),
             loader.loadTestsFromTestCase(ErrorContextTests),
         ])
@@ -1956,6 +2056,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         input_path = Path(args.input)
         source = read_source_text(input_path)
         scene = build_scene(source, args.width, args.height, input_path.resolve().parent, input_path.resolve())
+        if args.command == "inspect":
+            print(json.dumps(inspect_report(scene, args.text, args.kind, args.path, args.outside), ensure_ascii=False, indent=2))
+            return 0
         Path(args.svg).write_text(render_svg(scene), encoding="utf-8")
         report = scene_report(scene, tuple(args.hit) if args.hit else None)
         Path(args.layers).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
