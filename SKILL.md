@@ -1,15 +1,15 @@
 ---
 name: layerlang-mvp
-description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.5 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, and resource/code inspection reports. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, parameterized refs, cross-layer property access, absolute-pixel geometry, user-defined sugar, or photorealistic artwork; those are outside v0.5.
+description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.6 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, and resource/code inspection reports. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, parameterized refs, cross-layer property access, user-defined sugar, or photorealistic artwork; those are outside v0.6.
 ---
 
-# Layerlang v0.5
+# Layerlang v0.6
 
-使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。把语言规范视为语义权威，把本文件只视为使用流程。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.5 只把尺寸文法迁移为“数字＋单位”的后缀写法；旧前缀直接报错。anchor、坐标求值和 `resource/code` 报告沿用 v0.4 语义。
+使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.6 在 v0.5 后缀尺寸文法之上加入文件内常量和显式 `px`，anchor、ref 与 `resource/code` 报告语义保持不变。
 
 ## 准备
 
-1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_5.md](references/layerlang_v0_5.md)。
+1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_6.md](references/layerlang_v0_6.md)。
 2. 使用 [scripts/layerlang_mvp.py](scripts/layerlang_mvp.py)，不要为每次任务重新实现解析器。
 3. 确保 Python 环境具有 Pillow；文字和图片会统一转换为内嵌 PNG。
 4. 只使用当前规范，不要把“已废弃方案”或“未来脑洞”当成可用语法。
@@ -38,6 +38,29 @@ description: Generate, edit, render, and inspect deterministic SVG graphics with
     fill=#f2c94c
 ]
 ```
+
+## 使用常量与绝对像素
+
+需要直接表达固定像素时写 `px`，不要再把每个像素手工换算成画布分数：
+
+```text
+@margin=24px
+@halfMargin=1/2@margin
+@controlSize=30px
+
+[
+    x=@margin; y=@halfMargin;
+    w=@controlSize; h=@controlSize;
+    fill=#ffffff
+]
+```
+
+- 常量声明放在文档开头，每行一条；名称以 ASCII 字母开头，后续可含数字，大小写敏感。
+- 使用 `@name` 引用完整值，使用 `2@name` 或 `1/2@name` 取倍数；只能引用当前文件中**先前声明**的常量。
+- `px` 是当前画布的绝对坐标单位：`24px` 就是 24 个画布单位，不随父容器比例缩放。其他整数单位仍按百分比解释，例如 `24pw` 是父宽度的 24%。
+- 常量可以保存 `pw/ph/w/h/a/px` 尺寸，使用时仍按属性检查单位权限；普通 primitive 和 ref 的 `w/h` 必须大于零。
+- ref 定义只读自己文件里的常量，不读取调用方常量。没有跨文件常量、颜色 token、通用算术或参数传递。
+- 相对关系仍优先用 `pw/ph/w/h`；明确需要固定尺寸、像素对齐或 UI 间距时使用 `px`，不要自动混写猜测意图。
 
 ## 使用文字与引号
 
@@ -187,11 +210,11 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 管道输出；sub
 python3 scripts/layerlang_mvp.py self-test
 ```
 
-确保 59 项自测全部通过。
+确保 65 项自测全部通过。
 
 ## 绝对像素与复杂局部
 
-需要绝对间距、像素级对齐或复杂局部绘制时，用 Python 等外部工具生成确定性 PNG，再通过 image 或 ref 叠回。不要用 `xo=-48w` 凑 48px；它表示当前宽度的 48%。Layerlang 负责快速原型布局与验证，外部图片内部无需几何化。
+固定间距、像素级对齐和明确像素坐标使用 `px` 或文件内常量；复杂局部绘制、像素级素材仍可用 Python 等外部工具生成确定性 PNG，再通过 image 或 ref 叠回。相对比例与绝对像素是不同的显式意图，不要互相换算后猜意图。Layerlang 负责快速原型布局与验证，外部图片内部无需几何化。
 
 ## 排错
 
@@ -201,7 +224,7 @@ python3 scripts/layerlang_mvp.py self-test
 - 普通 primitive 和 ref 没有固有尺寸，不要使用 `a`；ref 必须显式写 `w/h`。
 - 引号只在值首生效；不要发明单引号、`\n` 或其他转义。
 - ref 报错时沿 `@定义名` 路径和引用链定位，不要通过暴露内部属性绕开封装。
-- 用户要求表达式、裁剪、多行富文本、URL 图片、参数化 ref、跨层属性访问、绝对像素几何、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.5，不要发明临时语法。
+- 用户要求表达式、裁剪、多行富文本、URL 图片、参数化 ref、跨层属性访问、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.6，不要发明临时语法。
 
 ## 视觉反馈
 
