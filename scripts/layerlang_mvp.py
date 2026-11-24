@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Layerlang constants+px spike（基于 v0.5.1）：验证文件内常量与绝对像素单位。
+"""Layerlang v0.6：矩形、文字、本地图片、本地引用、文件内常量与可溯源图层检查。
 
 依赖：Python 标准库与 Pillow。
   python3 layerlang_mvp.py self-test
@@ -31,7 +31,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-SPEC_VERSION = "0.6.0-constants-spike"
+SPEC_VERSION = "0.6"
 HERE = Path(__file__).resolve().parent
 
 
@@ -793,7 +793,7 @@ def build_scene(source: str, width: int = 1200, height: int = 1200, resource_dir
 def render_svg(scene: Scene) -> str:
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{scene.width}" height="{scene.height}" viewBox="0 0 {scene.width} {scene.height}">',
-        "  <!-- Layerlang constants+px spike: deterministic layers; content is scaled without preserving aspect ratio. -->",
+        "  <!-- Layerlang v0.6: deterministic layers; content is scaled without preserving aspect ratio. -->",
     ]
     for index, node in enumerate(scene.layers):
         rect = node.rect
@@ -1595,7 +1595,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Layerlang constants+px spike 渲染器")
+    parser = argparse.ArgumentParser(description="Layerlang v0.6 渲染器")
     subparsers = parser.add_subparsers(dest="command", required=True)
     render_parser = subparsers.add_parser("render")
     render_parser.add_argument("input")
