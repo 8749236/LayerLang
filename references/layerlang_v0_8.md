@@ -3,7 +3,7 @@
 - 状态：按当前实现固化，供检索；不是开发流程门禁。
 - 对应实现：`layerlang-mvp/scripts/layerlang_mvp.py`。
 - 运行依赖：Python 与 Pillow。
-- 验收基线：84 项自测全部通过；v0.8.1 修复参数定义错误路径，并加入 inspect 摘要与过滤。
+- 验收基线：85 项自测全部通过；v0.8.2 修复参数定义错误路径，加入 inspect 摘要、过滤与坐标查询。
 - 相对 v0.7 的变化：加入 ref 实例级文字、颜色和尺寸参数；参数采用完整 `$name` 占位与固定目标白名单，不包含默认值、嵌套转发、条件绘制或通用宏。
 
 ## 1. 当前模型
@@ -170,7 +170,7 @@ anchor 适用于所有 primitive 类型，offset 继续使用当前节点最终�
 
 上例读取当前定义文件同目录的 `card.txt`。定义名不接受路径分隔符，不能是 `.` 或 `..`，不能包含为展开路径保留的 `@`，也不能带 `.txt` 后缀。实现只读取本地文件，不访问网络。
 
-被引用文件是完整 Layerlang 文档，可以包含多个顶层 group，也可以继续使用 text/image/ref。ref 实例必须显式提供 `w/h`，只允许 `pw/ph`；没有固有尺寸，不能省略，也不能使用 `a`。
+被引用文件是完整 Layerlang 文档，可以包含多个顶层 group，也可以继续使用 text/image/ref。ref 实例必须显式提供 `w/h`，允许 `pw/ph/px`；没有固有尺寸，不能省略，也不能使用 `a`。
 
 调用方可以确定实例矩形、公共背景、实例子节点和定义中显式声明的参数。调用方不能任意读取或覆盖被引用对象的其他内部属性。
 
@@ -526,9 +526,10 @@ python3 scripts/layerlang_mvp.py inspect 输入.txt --outside
 python3 scripts/layerlang_mvp.py inspect 输入.txt --text "BRANCH"
 python3 scripts/layerlang_mvp.py inspect 输入.txt --kind ref
 python3 scripts/layerlang_mvp.py inspect 输入.txt --path "0@card"
+python3 scripts/layerlang_mvp.py inspect 输入.txt --at 600 600
 ```
 
-`--text` 匹配文字子串，`--kind` 按节点类型，`--path` 包含实例及展开子树，`--outside` 合并 partial/full。该命令不改变渲染和图层 schema，也不把生成器源码映射到生成物之外。
+`--text` 匹配文字子串，`--kind` 按节点类型，`--path` 包含实例及展开子树，`--outside` 合并 partial/full，`--at` 按从底到顶返回坐标命中节点。该命令不改变渲染和图层 schema，也不把生成器源码映射到生成物之外。
 
 ## 10. 绝对像素与复杂局部
 
@@ -576,7 +577,7 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 上被 subprocess 
 
 ## 13. 验收基线
 
-当前 84 项自测由十四组构成：
+当前 85 项自测由十四组构成：
 
 - 15 项矩形回归：既有几何、顺序、越界、命中和错误处理，并逐一拒绝 `pw/ph/w/h/a` 旧前缀写法；
 - 11 项文字测试：固有尺寸、显式缩放、默认字号、填充顺序和错误处理；
@@ -589,7 +590,7 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 上被 subprocess 
 - 6 项常量测试：直接 `px`、派生倍数、ref 文件隔离、非法声明与引用、单位权限，以及常量头下的 CRLF 源码范围；
 - 7 项 lining 测试：直接四边、1／2／4 值展开、ref 与自有子级共享 parent、负值外扩、非正 parent 拒绝、常量与 `px`，以及冲突和非法输入；
 - 8 项参数测试：文字与颜色变体、调用方尺寸常量、引号字面量、缺失与保留参数、值和类型错误、嵌套静态参数与转发拒绝、实例报告，以及非法参数位置；
-- 3 项 inspect 测试：摘要与越界、文字过滤、类型与子树过滤；
+- 4 项 inspect 测试：摘要与越界、文字过滤、类型与子树过滤、坐标命中；
 - 1 项 CLI 测试：强制遗留区域编码时，管道 stdout/stderr 仍按 UTF-8 输出；
 - 2 项错误上下文测试：嵌套 ref 资源失败包含 `code`、定义文件、行列和节点路径；参数定义错误的 `source_path` 指向定义文件而非调用点。
 

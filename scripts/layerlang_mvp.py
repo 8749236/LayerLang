@@ -1898,6 +1898,13 @@ class InspectTests(unittest.TestCase):
         by_path = self.run_inspect(source, "--path", "0", refs=True)
         self.assertEqual([layer["path"] for layer in by_path["layers"]], ["0", "0@card/0"])
 
+    def test_at_returns_geometric_hits_bottom_to_top(self) -> None:
+        source = "[w=100px;h=100px|text=hello]"
+        both = self.run_inspect(source, "--at", "50", "50")
+        self.assertEqual([layer["path"] for layer in both["layers"]], ["0", "0/0"])
+        parent_only = self.run_inspect(source, "--at", "90", "90")
+        self.assertEqual([layer["path"] for layer in parent_only["layers"]], ["0"])
+
 
 class CliTests(unittest.TestCase):
     def test_piped_stdout_and_stderr_are_utf8_under_legacy_locale(self) -> None:
@@ -1975,7 +1982,7 @@ class ErrorContextTests(unittest.TestCase):
             self.assertIn("内置属性冲突", caught.exception.message)
 
 
-def inspect_report(scene: Scene, text: Optional[str] = None, kind: Optional[str] = None, path: Optional[str] = None, outside: bool = False) -> dict[str, object]:
+def inspect_report(scene: Scene, text: Optional[str] = None, kind: Optional[str] = None, path: Optional[str] = None, outside: bool = False, at: Optional[tuple[str, str]] = None) -> dict[str, object]:
     report = scene_report(scene)
     layers = report["layers"]
     kinds = Counter(layer["kind"] for layer in layers)
@@ -1985,7 +1992,8 @@ def inspect_report(scene: Scene, text: Optional[str] = None, kind: Optional[str]
         "parameterized_refs": sum(1 for layer in layers if layer["kind"] == "ref" and layer["content_metadata"] and layer["content_metadata"].get("parameters")),
         "outside": report["outside"],
     }
-    filters = {"text": text, "kind": kind, "path": path, "outside": outside}
+    filters = {"text": text, "kind": kind, "path": path, "outside": outside, "at": at}
+    hit_paths = {node.path for node in hit(scene, at[0], at[1])} if at is not None else None
 
     def matches(layer: dict[str, object]) -> bool:
         if text is not None and text not in (layer["text"] or ""):
@@ -1996,9 +2004,11 @@ def inspect_report(scene: Scene, text: Optional[str] = None, kind: Optional[str]
             return False
         if outside and layer["outside"] == "inside":
             return False
+        if hit_paths is not None and layer["path"] not in hit_paths:
+            return False
         return True
 
-    selected = [layer for layer in layers if matches(layer)] if any((text is not None, kind is not None, path is not None, outside)) else []
+    selected = [layer for layer in layers if matches(layer)] if any((text is not None, kind is not None, path is not None, outside, at is not None)) else []
     return {
         "spec_version": report["spec_version"],
         "canvas": report["canvas"],
@@ -2031,6 +2041,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     inspect_parser.add_argument("--kind", choices=("rect", "text", "image", "ref"))
     inspect_parser.add_argument("--path")
     inspect_parser.add_argument("--outside", action="store_true")
+    inspect_parser.add_argument("--at", nargs=2, metavar=("X", "Y"))
     args = parser.parse_args(argv)
     if args.command == "self-test":
         loader = unittest.defaultTestLoader
@@ -2057,7 +2068,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         source = read_source_text(input_path)
         scene = build_scene(source, args.width, args.height, input_path.resolve().parent, input_path.resolve())
         if args.command == "inspect":
-            print(json.dumps(inspect_report(scene, args.text, args.kind, args.path, args.outside), ensure_ascii=False, indent=2))
+            print(json.dumps(inspect_report(scene, args.text, args.kind, args.path, args.outside, tuple(args.at) if args.at else None), ensure_ascii=False, indent=2))
             return 0
         Path(args.svg).write_text(render_svg(scene), encoding="utf-8")
         report = scene_report(scene, tuple(args.hit) if args.hit else None)

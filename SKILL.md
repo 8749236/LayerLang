@@ -5,7 +5,7 @@ description: Generate, edit, render, and inspect deterministic SVG graphics with
 
 # Layerlang v0.8
 
-使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.8 加入三类 ref 参数：文字、颜色和尺寸；v0.8.1 修复参数定义错误路径，并加入 inspect 摘要与过滤命令。
+使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.8 加入三类 ref 参数：文字、颜色和尺寸；v0.8.2 修复参数定义错误路径，加入 inspect 摘要、过滤与 `--at` 坐标查询，并补充复杂度预算。
 
 ## 准备
 
@@ -190,7 +190,7 @@ lining=1px,2px,3px,4px       上、右、下、左
 
 `ref=card` 读取当前定义文件同目录的 `card.txt`。被引用文件是完整 Layerlang 文档，可以包含多个顶层 group、text/image 或下一层 ref。
 
-- ref 必须显式提供 `w/h`，只允许 `pw/ph`；没有 `a` 固有尺寸。
+- ref 必须显式提供 `w/h`，允许 `pw/ph/px`；没有 `a` 固有尺寸。
 - 实例最终矩形先应用自身 lining，再作为被引用文档中所有顶层节点的 parent；实例外框和自身内容不内缩。每个实例独立求值，不共享几何状态。
 - 调用方不能任意读取或覆盖组件内部属性，只能提供定义中 `$name` 显式声明的实参，见下一节。
 - ref 自身可以有 `fill` 和 `|` 子节点；顺序为 `fill → 组件展开内容 → 自有子节点`。
@@ -285,9 +285,10 @@ python3 scripts/layerlang_mvp.py inspect 输入.txt --outside
 python3 scripts/layerlang_mvp.py inspect 输入.txt --text "BRANCH"
 python3 scripts/layerlang_mvp.py inspect 输入.txt --kind ref
 python3 scripts/layerlang_mvp.py inspect 输入.txt --path "0@card"
+python3 scripts/layerlang_mvp.py inspect 输入.txt --at 600 600
 ```
 
-无过滤时 `layers` 为空，只输出摘要；有过滤时返回匹配图层的完整报告。`--path` 包含指定实例及其展开子树，`--outside` 合并 partial/full。生成器产物的 `code` 仍指向生成的 `.txt`，不自动指向生成器源码。
+无过滤时 `layers` 为空，只输出摘要；有过滤时返回匹配图层的完整报告。`--path` 包含指定实例及其展开子树，`--outside` 合并 partial/full，`--at x y` 按从底到顶返回坐标命中的图层。生成器产物的 `code` 仍指向生成的 `.txt`，不自动指向生成器源码。
 
 CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 管道输出；subprocess 调用方应按 UTF-8 解码，不要使用系统区域编码。
 
@@ -297,11 +298,18 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 管道输出；sub
 python3 scripts/layerlang_mvp.py self-test
 ```
 
-确保 84 项自测全部通过。
+确保 85 项自测全部通过。
 
 ## 绝对像素与复杂局部
 
 固定间距、像素级对齐和明确像素坐标使用 `px` 或文件内常量；复杂局部绘制、像素级素材仍可用 Python 等外部工具生成确定性 PNG，再通过 image 或 ref 叠回。相对比例与绝对像素是不同的显式意图，不要互相换算后猜意图。Layerlang 负责快速原型布局与验证，外部图片内部无需几何化。
+
+## 什么时候不要这样用
+
+- 需要组件随实例缩放、保持父子关系时，优先 `pw/ph/w/h`；不要为了省去比例思考，把可复用组件内部全部改成 `px`。固定画布、像素稿和明确间距则可以直接使用 `px`。
+- 需要整体移动的独立模块才拆 ref；不要给每个小 primitive 都创建一个一次性文件。结构相同但内容变化时使用参数，固定内容复用继续使用静态 ref。
+- 不要为假想未来需求叠加默认值、条件、表达式或自定义宏。当前目标仍是可检查的快速原型，而不是通用 UI 框架。
+- 如果修改持续依赖生成器，先检查是否缺少组件边界、参数或 inspect 使用，不要把生成器当成默认 source of truth。
 
 ## 排错
 
