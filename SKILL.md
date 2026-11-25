@@ -1,15 +1,15 @@
 ---
 name: layerlang-mvp
-description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.9 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, child-frame lining, defaultable ref declarations, and resource/code/parent_rect inspection reports and filtered CLI inspection. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, cross-layer property access, user-defined sugar, or photorealistic artwork; those are outside v0.9.
+description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.10 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, child-frame lining, defaultable ref declarations, local style classes, and resource/code/parent_rect inspection reports and filtered CLI inspection. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, cross-layer property access, user-defined sugar, or photorealistic artwork; those are outside v0.10.
 ---
 
-# Layerlang v0.9
+# Layerlang v0.10
 
-使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.9 用 `@声明＋set.` 统一常量、带默认值的可选项与无默认值的必填项，支持语义色和显式嵌套转发；inspect 摘要、过滤与 `--at` 坐标查询继续保留。
+使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.10 在 `@声明＋set.` 之上加入 `.name` 样式属性包与 `class=name`，支持语义色和显式嵌套转发；inspect 摘要、过滤与 `--at` 坐标查询继续保留。
 
 ## 准备
 
-1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_9.md](references/layerlang_v0_9.md)。
+1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_10.md](references/layerlang_v0_10.md)。
 2. 使用 [scripts/layerlang_mvp.py](scripts/layerlang_mvp.py)，不要为每次任务重新实现解析器。
 3. 确保 Python 环境具有 Pillow；文字和图片会统一转换为内嵌 PNG。
 4. 只使用当前规范，不要把“已废弃方案”或“未来脑洞”当成可用语法。
@@ -233,8 +233,31 @@ lining=1px,2px,3px,4px       上、右、下、左
 - 声明值可以是文字、颜色或尺寸。`@accent=#58a6ff` 可用于 `color/fill`，`@pad=24px` 可用于几何属性，`@label="hello"` 可用于 `text`。
 - 声明名允许 ASCII 字母、数字、下划线和点，例如 `@text.primary`。点只是名称的一部分，不表示对象访问。
 - 嵌套 ref 用 `set.accent=@accent` 显式转发当前文件中的值。转发在调用方环境解析，再传给下一层，不自动形成全局主题。
-- `size/font/image/ref/anchor` 和 `lining=` 简写不接受声明引用。条件绘制、slots、repeat、通用表达式和 `$class` 仍不属于当前版本。
+- `size/font/image/ref/anchor` 和 `lining=` 简写不接受声明引用。条件绘制、slots、repeat、通用表达式和多 class 层叠仍不属于当前版本。
 - ref 实例的 `content_metadata.parameters` 保存本次 `set.` 覆盖及类型；默认值不重复记录。内部节点的 `code` 仍指向组件定义，实例 `code` 指向调用点。
+
+## 使用样式属性包
+
+文件头用 `.name` 声明样式，primitive 用 `class=name` 应用。样式只负责属性复用，不是选择器、节点宏或层叠系统：
+
+```text
+@accent=#58a6ff
+.muted = color=#6e7681; font=consola.ttf; size=8
+.accent_text = color=@accent; font=consola.ttf; size=8
+
+[
+    text="BRANCH"; class=accent_text
+    |
+    text="09"; class=muted
+]
+```
+
+- 只允许 `color/fill/font/size` 四类样式属性。`x/y/w/h/anchor/lining/ref/text/image` 不允许进入样式，避免变成布局或节点宏。
+- 一个 primitive 最多一个 class；样式不能引用其他样式，也没有继承、条件、repeat 或多 class 组合。
+- 展开 key 与手写 key 冲突就报错，例如 `class=muted;color=#ffffff`，不做 CSS 式覆盖。
+- 样式按文件隔离，没有 `set.class` 或跨文件 class 覆盖；样式内可以引用 `@accent`，实例的 `set.accent` 会改变展开结果。
+- 节点的 `code` 仍指向应用点；`content_metadata.class` 保存样式名和 `class.code`，用于定位文件头中的样式定义。
+- `$` 继续保持 reserved，不参与当前样式语法。
 
 ## 修改与溯源
 
@@ -296,7 +319,7 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 管道输出；sub
 python3 scripts/layerlang_mvp.py self-test
 ```
 
-确保 86 项自测全部通过。
+确保 92 项自测全部通过。
 
 ## 绝对像素与复杂局部
 
@@ -317,7 +340,7 @@ python3 scripts/layerlang_mvp.py self-test
 - 普通 primitive 和 ref 没有固有尺寸，不要使用 `a`；ref 必须显式写 `w/h`。
 - 引号只在值首生效；不要发明单引号、`\n` 或其他转义。
 - ref 报错时沿 `@定义名` 路径和引用链定位，不要通过暴露内部属性绕开封装。
-- 用户要求表达式、裁剪、多行富文本、URL 图片、跨层属性访问、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.9，不要发明临时语法。
+- 用户要求表达式、裁剪、多行富文本、URL 图片、跨层属性访问、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.10，不要发明临时语法。
 
 ## 视觉反馈
 

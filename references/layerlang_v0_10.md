@@ -1,10 +1,10 @@
-# 图层语言（Layerlang）v0.9 行为说明
+# 图层语言（Layerlang）v0.10 行为说明
 
 - 状态：按当前实现固化，供检索；不是开发流程门禁。
 - 对应实现：`layerlang-mvp/scripts/layerlang_mvp.py`。
 - 运行依赖：Python 与 Pillow。
-- 验收基线：86 项自测全部通过。
-- 相对 v0.8 的变化：用 `@声明＋set.` 统一常量、带默认值的可选项与无默认值的必填项，加入语义色、点号声明名和显式嵌套转发；不再使用 `$name` 参数语法。
+- 验收基线：92 项自测全部通过。
+- 相对 v0.9 的变化：加入 `.name` 样式属性包和 `class=name`，只允许 `color/fill/font/size`，文件本地、单 class、展开冲突即报错。
 
 ## 1. 当前模型
 
@@ -22,7 +22,7 @@ Layerlang 主要服务于快速原型验证，而不是完整美术产出：agen
 
 ## 2. 非目标
 
-v0.9 明确不支持：
+v0.10 明确不支持：
 
 - 跨 layer 任意属性读取或写入、隐式全局主题与通用 namespace；
 - 通用表达式、函数、条件、循环；
@@ -327,6 +327,24 @@ ref 调用点使用固定前缀 `set.name` 覆盖公共声明。未知 `set.` �
 
 源码 `code.offset` 始终相对包含声明头的完整原文件，CRLF 等原始换行继续保留。
 
+### 5.3 样式属性包
+
+文件头可以用 `.name` 声明样式，primitive 用 `class=name` 应用：
+
+```text
+@accent=#58a6ff
+.muted = color=#6e7681; font=consola.ttf; size=8
+.accent_text = color=@accent; font=consola.ttf; size=8
+
+[text="BRANCH"; class=accent_text | text="09"; class=muted]
+```
+
+样式只允许 `color/fill/font/size`。`x/y/w/h/anchor/lining/ref/text/image` 不允许进入样式，防止其变成布局或节点宏。一个 primitive 最多一个 class，样式不能引用其他样式，没有继承、条件、repeat 或多 class 层叠。
+
+样式先展开为属性，再进入常量、类型和几何校验。展开 key 与手写 key 的交集必须为空，否则在 class 应用点报错。未知样式、重复声明、非法属性和未加引号的样式引用均报错。
+
+样式按文件隔离，没有 `set.class` 或跨文件 class 覆盖。样式内可以引用 `@accent`，实例的 `set.accent` 会改变展开结果。节点 `code` 指向应用点，`content_metadata.class` 保存样式名和 `class.code`，用于定位文件头定义。`$` 不参与当前样式语法。
+
 ## 6. 固有尺寸与缩放
 
 ### 6.1 text
@@ -415,7 +433,7 @@ ref fill → ref 定义展开内容 → ref 自有子节点
 
 JSON 报告包含：
 
-- `spec_version`，当前为 `0.9`；
+- `spec_version`，当前为 `0.10`；
 - 全局画布尺寸；
 - 节点序号、路径与 `kind`；
 - `fill、text`；
@@ -429,7 +447,7 @@ JSON 报告包含：
 - `outside` 越界状态；
 - 可选 `hit` 命中结果。
 
-v0.9 保留 `parent_rect`，并在带覆盖 ref 实例的 `content_metadata.parameters` 中记录 `set.` 覆盖的类型与值。
+v0.10 保留 `parent_rect`，并在带覆盖 ref 实例的 `content_metadata.parameters` 中记录 `set.` 覆盖；样式节点的 `content_metadata.class` 额外记录样式名与定义范围。
 
 ### 9.2 resource 与 code：资源产地和源码范围
 
@@ -536,7 +554,8 @@ python3 scripts/layerlang_mvp.py inspect 输入.txt --at 600 600
 - 当前版本不支持的嵌套括号；
 - 缺失字体、URL 图片、缺失图片和不支持的格式；
 - 非法 ref 定义名、缺失定义、引用循环、深度或节点数超限；
-- 缺失或未知 `set.`、类型冲突的声明与覆盖、非法声明位置和转发环境。
+- 缺失或未知 `set.`、类型冲突的声明与覆盖、非法声明位置和转发环境；
+- 未知样式、重复样式、非法样式属性和 class 展开冲突。
 
 解析错误包含对应源文本行号和列号；通过文件构建时同时给出源文件路径。字体、图片等求值或资源错误还必须携带当前节点路径和该节点的 `code` 源码范围，因为失败节点不会进入最终图层报告。CLI 应以源文件、行列和节点路径呈现这些错误，而不是只打印裸 `ValueError`。引用循环继续给出完整引用链。
 
@@ -558,7 +577,7 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 上被 subprocess 
 
 ## 13. 验收基线
 
-当前 86 项自测由十四组构成：
+当前 92 项自测由十五组构成：
 
 - 15 项矩形回归：既有几何、顺序、越界、命中和错误处理，并逐一拒绝 `pw/ph/w/h/a` 旧前缀写法；
 - 11 项文字测试：固有尺寸、显式缩放、默认字号、填充顺序和错误处理；
@@ -571,6 +590,7 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 上被 subprocess 
 - 6 项常量测试：直接 `px`、派生倍数、ref 文件隔离、非法声明与引用、单位权限，以及常量头下的 CRLF 源码范围；
 - 7 项 lining 测试：直接四边、1／2／4 值展开、ref 与自有子级共享 parent、负值外扩、非正 parent 拒绝、常量与 `px`，以及冲突和非法输入；
 - 9 项声明测试：默认值与独立覆盖、调用方尺寸常量、点号语义色、引号字面量、缺失与未知覆盖、值和类型错误、嵌套默认与必填转发、实例报告，以及非法声明位置；
+- 6 项样式测试：属性包展开、默认值与实例覆盖、未知与冲突、非法声明、文件隔离，以及应用点与定义点源码范围；
 - 4 项 inspect 测试：摘要与越界、文字过滤、类型与子树过滤、坐标命中；
 - 1 项 CLI 测试：强制遗留区域编码时，管道 stdout/stderr 仍按 UTF-8 输出；
 - 2 项错误上下文测试：嵌套 ref 资源失败包含 `code`、定义文件、行列和节点路径；参数定义错误的 `source_path` 指向定义文件而非调用点。

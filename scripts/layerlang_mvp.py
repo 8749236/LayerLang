@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Layerlang v0.9：矩形、文字、本地图片、参数化本地引用、文件内常量、lining 与可溯源图层检查。
+"""Layerlang v0.10：矩形、文字、本地图片、参数化本地引用、文件内常量、lining、样式属性包与可溯源图层检查。
 
 依赖：Python 标准库与 Pillow。
   python3 layerlang_mvp.py self-test
@@ -32,7 +32,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-SPEC_VERSION = "0.9"
+SPEC_VERSION = "0.10"
 HERE = Path(__file__).resolve().parent
 
 
@@ -95,6 +95,7 @@ class NodeSpec:
     attrs: dict[str, Attr]
     position: int
     end: int
+    style: object = None
 
 
 @dataclass
@@ -112,9 +113,18 @@ class ConstantSpec:
 
 
 @dataclass
+class StyleSpec:
+    name: str
+    attrs: dict[str, Attr]
+    position: int
+    end: int
+
+
+@dataclass
 class ParsedDocument:
     groups: list[Group]
     constant_specs: list[ConstantSpec]
+    style_specs: list[StyleSpec] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -152,9 +162,13 @@ class Parser:
     def parse(self) -> ParsedDocument:
         groups: list[Group] = []
         constants: list[ConstantSpec] = []
+        styles: list[StyleSpec] = []
         self.skip_space()
-        while self.pos < len(self.source) and self.source[self.pos] == "@":
-            constants.append(self.parse_constant())
+        while self.pos < len(self.source) and self.source[self.pos] in "@.":
+            if self.source[self.pos] == "@":
+                constants.append(self.parse_constant())
+            else:
+                styles.append(self.parse_style())
             self.skip_space()
         while self.pos < len(self.source):
             if self.source[self.pos] != "[":
@@ -163,7 +177,7 @@ class Parser:
             self.skip_space()
         if not groups:
             raise self.error("文档为空", 0)
-        return ParsedDocument(groups, constants)
+        return ParsedDocument(groups, constants, styles)
 
     def parse_constant(self) -> ConstantSpec:
         start = self.pos
@@ -196,6 +210,70 @@ class Parser:
         if self.pos < len(self.source) and self.source[self.pos] not in "\r\n":
             raise self.error("声明每行只能有一个值", self.pos)
         return ConstantSpec(name, value, value_start, quoted)
+
+    def parse_style(self) -> StyleSpec:
+        start = self.pos
+        self.pos += 1  # .
+        match = re.match(r"[a-z][a-z0-9_]*", self.source[self.pos:])
+        if not match:
+            raise self.error("样式名必须以小写字母开头，后续可含小写字母、数字或下划线", self.pos)
+        name = match.group(0)
+        self.pos += len(name)
+        while self.pos < len(self.source) and self.source[self.pos] in " \t":
+            self.pos += 1
+        if self.pos >= len(self.source) or self.source[self.pos] != "=":
+            raise self.error(f"样式 {name} 后缺少 =", start)
+        self.pos += 1
+        attrs: dict[str, Attr] = {}
+        while True:
+            while self.pos < len(self.source) and self.source[self.pos] in " \t":
+                self.pos += 1
+            if self.pos >= len(self.source) or self.source[self.pos] in "\r\n":
+                break
+            key_start = self.pos
+            match = re.match(r"[a-z]+", self.source[self.pos:])
+            if not match:
+                raise self.error("样式中预期属性名", key_start)
+            key = match.group(0)
+            if key not in {"color", "fill", "font", "size"}:
+                raise LangError(f"样式只允许 color/fill/font/size；收到 {key}", self.source, key_start)
+            if key in attrs:
+                raise LangError(f"样式属性 {key} 重复", self.source, key_start)
+            self.pos += len(key)
+            while self.pos < len(self.source) and self.source[self.pos] in " \t":
+                self.pos += 1
+            if self.pos >= len(self.source) or self.source[self.pos] != "=":
+                raise LangError(f"样式属性 {key} 后缺少 =", self.source, key_start)
+            self.pos += 1
+            while self.pos < len(self.source) and self.source[self.pos] in " \t":
+                self.pos += 1
+            value_start = self.pos
+            quoted = self.pos < len(self.source) and self.source[self.pos] == '"'
+            if quoted:
+                value, _ = self.parse_quoted_value(";\r\n", False)
+            else:
+                while self.pos < len(self.source) and self.source[self.pos] not in " \t\r\n;":
+                    self.pos += 1
+                value = self.source[value_start:self.pos]
+                if not value:
+                    raise LangError(f"样式属性 {key} 缺少值", self.source, value_start)
+            attr = Attr(key, value, value_start, quoted)
+            if key == "size" and (not re.fullmatch(r"\d+", value) or int(value) <= 0):
+                raise LangError("样式 size 必须是正整数像素", self.source, value_start)
+            if key in {"color", "fill"} and not value.startswith("@"):
+                validate_color(attr, self.source)
+            attrs[key] = attr
+            while self.pos < len(self.source) and self.source[self.pos] in " \t":
+                self.pos += 1
+            if self.pos < len(self.source) and self.source[self.pos] == ";":
+                self.pos += 1
+                continue
+            if self.pos < len(self.source) and self.source[self.pos] not in "\r\n":
+                raise LangError("样式声明每行只能有一组属性", self.source, self.pos)
+            break
+        if not attrs:
+            raise LangError(f"样式 {name} 不能为空", self.source, start)
+        return StyleSpec(name, attrs, start, self.pos)
 
     def parse_group(self) -> Group:
         start = self.pos
@@ -372,7 +450,7 @@ PARAMETER_TARGETS = {
     "xo": "dimension", "yo": "dimension",
     "ll": "dimension", "lr": "dimension", "lt": "dimension", "lb": "dimension",
 }
-COMMON_ATTRS = {"x", "y", "w", "h", "xo", "yo", "anchor", "fill", "lining", "ll", "lr", "lt", "lb"}
+COMMON_ATTRS = {"x", "y", "w", "h", "xo", "yo", "anchor", "fill", "lining", "ll", "lr", "lt", "lb", "class"}
 TEXT_ATTRS = {"text", "font", "size", "color"}
 IMAGE_ATTRS = {"image"}
 REF_ATTRS = {"ref"}
@@ -470,6 +548,34 @@ def iter_node_specs(document: ParsedDocument):
     for group in document.groups:
         yield group.base
         yield from group.children
+
+
+def apply_styles(document: ParsedDocument, source: str) -> ParsedDocument:
+    styles: dict[str, StyleSpec] = {}
+    for style in document.style_specs:
+        if style.name in styles:
+            raise LangError(f"样式 {style.name} 重复声明", source, style.position)
+        styles[style.name] = style
+
+    def apply(spec: NodeSpec) -> NodeSpec:
+        if "class" not in spec.attrs:
+            return spec
+        attr = spec.attrs["class"]
+        if attr.quoted or not re.fullmatch(r"[a-z][a-z0-9_]*", attr.value):
+            raise LangError("class 必须使用未加引号的样式名", source, attr.position)
+        if attr.value not in styles:
+            raise LangError(f"未找到当前文件样式 {attr.value}", source, attr.position)
+        style = styles[attr.value]
+        conflicts = set(style.attrs) & set(spec.attrs)
+        if conflicts:
+            raise LangError(f"class={style.name} 展开属性与手写属性冲突：{sorted(conflicts)}", source, attr.position)
+        attrs = dict(spec.attrs)
+        del attrs["class"]
+        attrs.update(style.attrs)
+        return NodeSpec(attrs, spec.position, spec.end, style)
+
+    groups = [Group(apply(group.base), [apply(child) for child in group.children]) for group in document.groups]
+    return ParsedDocument(groups, document.constant_specs, document.style_specs)
 
 
 def dimension_text(dimension: Dimension) -> str:
@@ -872,7 +978,7 @@ def _evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Pa
             except OSError as error:
                 raise EvaluationError(f"无法读取 ref 定义 {str(target)!r}：{error}", code, path) from error
             try:
-                document = parse(definition_source)
+                document = apply_styles(parse(definition_source), definition_source)
                 resolve_constants(document.constant_specs, definition_source)
             except LangError as error:
                 error.source_path = str(target)
@@ -969,6 +1075,11 @@ def _evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Pa
                 name: {"type": value.kind, "value": parameter_text(value)}
                 for name, value in parameter_values.items()
             }
+    if spec.style is not None:
+        node.metadata["class"] = {
+            "name": spec.style.name,
+            "code": make_code_location(source, spec.style.position, spec.style.end, current_source),
+        }
     return node
 
 
@@ -1013,7 +1124,7 @@ def build_scene(source: str, width: int = 1200, height: int = 1200, resource_dir
     context = RefContext(resource_dir=resource_dir, stack=stack)
     canvas = Rect(Fraction(0), Fraction(0), Fraction(width), Fraction(height))
     try:
-        document = parse(source)
+        document = apply_styles(parse(source), source)
         constants = resolve_constants(document.constant_specs, source)
         missing = {spec.name for spec in document.constant_specs if spec.value is None}
         if missing:
@@ -1029,7 +1140,7 @@ def build_scene(source: str, width: int = 1200, height: int = 1200, resource_dir
 def render_svg(scene: Scene) -> str:
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{scene.width}" height="{scene.height}" viewBox="0 0 {scene.width} {scene.height}">',
-        "  <!-- Layerlang v0.9: deterministic layers; content is scaled without preserving aspect ratio. -->",
+        "  <!-- Layerlang v0.10: deterministic layers; content is scaled without preserving aspect ratio. -->",
     ]
     for index, node in enumerate(scene.layers):
         rect = node.rect
@@ -1932,6 +2043,74 @@ class ParameterTests(unittest.TestCase):
             self.build("[ref=badsize;set.size=40;w=100px;h=100px]")
 
 
+class StyleTests(unittest.TestCase):
+    def test_basic_style_expands_and_records_definition(self) -> None:
+        source = ".muted = color=#6e7681; size=8\n[text=hello;class=muted]"
+        scene = build_scene(source)
+        node = scene.layers[0]
+        self.assertEqual(node.metadata["foreground"], "#6e7681")
+        self.assertEqual(node.metadata["size_px"], 8)
+        self.assertEqual(node.metadata["class"]["name"], "muted")
+        code = node.metadata["class"]["code"]
+        self.assertEqual(source[code["start"]["offset"]:code["end"]["offset"]], ".muted = color=#6e7681; size=8")
+
+    def test_style_uses_defaults_and_instance_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "event.txt").write_text(
+                "@label\n@accent\n.accent_text = color=@accent; size=14\n[text=@label;class=accent_text]",
+                encoding="utf-8",
+            )
+            scene = build_scene(
+                "[ref=event;set.label=CALL;set.accent=#79c0ff;w=100px;h=40px]"
+                "[ref=event;set.label=RET;set.accent=#7ee787;w=100px;h=40px]",
+                resource_dir=directory,
+            )
+            self.assertEqual(scene.layers[1].metadata["foreground"], "#79c0ff")
+            self.assertEqual(scene.layers[3].metadata["foreground"], "#7ee787")
+
+    def test_unknown_and_conflicting_styles_are_rejected(self) -> None:
+        with self.assertRaisesRegex(LangError, "冲突"):
+            build_scene(".muted = color=#6e7681\n[text=hello;class=muted;color=#ffffff]")
+        with self.assertRaisesRegex(LangError, "未找到当前文件样式"):
+            build_scene("[text=hello;class=missing]")
+        with self.assertRaisesRegex(LangError, "未加引号"):
+            build_scene('.muted = color=#6e7681\n[text=hello;class="muted"]')
+
+    def test_invalid_style_declarations_are_rejected(self) -> None:
+        for source in (
+            ".bad = x=1px\n[text=hello]",
+            ".bad = class=other\n[text=hello]",
+            ".bad = size=0\n[text=hello]",
+            ".muted = color=#000000\n.muted = color=#ffffff\n[text=hello]",
+        ):
+            with self.subTest(source=source):
+                with self.assertRaises(LangError):
+                    build_scene(source)
+
+    def test_styles_are_local_to_each_definition_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "a.txt").write_text(".muted = color=#111111\n[text=A;class=muted]", encoding="utf-8")
+            (directory / "b.txt").write_text(".muted = color=#222222\n[text=B;class=muted]", encoding="utf-8")
+            source = ".muted = color=#ffffff\n[ref=a;w=100px;h=100px][ref=b;w=100px;h=100px]"
+            scene = build_scene(source, resource_dir=directory)
+            self.assertEqual(scene.layers[1].metadata["foreground"], "#111111")
+            self.assertEqual(scene.layers[3].metadata["foreground"], "#222222")
+            (directory / "plain.txt").write_text("[text=plain;class=muted]", encoding="utf-8")
+            with self.assertRaisesRegex(LangError, "未找到当前文件样式"):
+                build_scene(source.replace("ref=b", "ref=plain"), resource_dir=directory)
+
+    def test_application_and_definition_code_spans_remain_distinct(self) -> None:
+        source = ".muted = color=#6e7681; size=8\n[text=hello;class=muted]"
+        report = scene_report(build_scene(source))
+        layer = report["layers"][0]
+        application = layer["code"]
+        definition = layer["content_metadata"]["class"]["code"]
+        self.assertEqual(source[application["start"]["offset"]:application["end"]["offset"]], "text=hello;class=muted")
+        self.assertEqual(source[definition["start"]["offset"]:definition["end"]["offset"]], ".muted = color=#6e7681; size=8")
+
+
 class InspectTests(unittest.TestCase):
     def run_inspect(self, source: str, *arguments: str, width: int = 100, height: int = 100, refs: bool = False) -> dict[str, object]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2095,7 +2274,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Layerlang v0.9 渲染器")
+    parser = argparse.ArgumentParser(description="Layerlang v0.10 渲染器")
     subparsers = parser.add_subparsers(dest="command", required=True)
     render_parser = subparsers.add_parser("render")
     render_parser.add_argument("input")
@@ -2129,6 +2308,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             loader.loadTestsFromTestCase(ConstantsTests),
             loader.loadTestsFromTestCase(LiningTests),
             loader.loadTestsFromTestCase(ParameterTests),
+            loader.loadTestsFromTestCase(StyleTests),
             loader.loadTestsFromTestCase(InspectTests),
             loader.loadTestsFromTestCase(CliTests),
             loader.loadTestsFromTestCase(ErrorContextTests),
