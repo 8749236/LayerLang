@@ -1,15 +1,15 @@
 ---
 name: layerlang-mvp
-description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.10 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, child-frame lining, defaultable ref declarations, local style classes, and resource/code/parent_rect inspection reports and filtered CLI inspection. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, cross-layer property access, user-defined sugar, or photorealistic artwork; those are outside v0.10.
+description: Generate, edit, render, and inspect deterministic SVG graphics with the Layerlang v0.11 relative-layer DSL, including rectangles, quoted single-line text, local PNG/JPEG images, encapsulated local refs, composable axis anchoring, child-frame lining, defaultable ref declarations, local or explicitly shared style classes, and resource/code/parent_rect inspection reports and filtered CLI inspection. Use when the user mentions 图层语言、Layerlang、100pw/50ph primitives、比例色块、AI 绘图 DSL，or asks to create or locally modify supported wireframes, diagrams, posters, reusable components, abstract vector compositions, and layer-based graphics without relying on native image generation. Do not use it for expressions, clipping, multiline rich text, URL images, cross-layer property access, user-defined sugar, or photorealistic artwork; those are outside v0.11.
 ---
 
-# Layerlang v0.10
+# Layerlang v0.11
 
-使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.10 在 `@声明＋set.` 之上加入 `.name` 样式属性包与 `class=name`，支持语义色和显式嵌套转发；inspect 摘要、过滤与 `--at` 坐标查询继续保留。
+使用随附渲染器把 Layerlang 源文本转换为 SVG 和图层 JSON。规范链接只是当前行为索引，不是开发门禁；探索时以可运行行为和真实反馈为准。Layerlang 用于快速原型验证：agent 检查几何与组合关系，人通过渲染图反馈意图。v0.11 加入 `use=theme.txt` 共享声明文件，常量、语义色和样式属性包可以被多个主文档及 ref 显式共享；嵌套转发与 inspect 行为保持不变。
 
 ## 准备
 
-1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_10.md](references/layerlang_v0_10.md)。
+1. 首次使用或语法不确定时，阅读 [references/layerlang_v0_11.md](references/layerlang_v0_11.md)。
 2. 使用 [scripts/layerlang_mvp.py](scripts/layerlang_mvp.py)，不要为每次任务重新实现解析器。
 3. 确保 Python 环境具有 Pillow；文字和图片会统一转换为内嵌 PNG。
 4. 只使用当前规范，不要把“已废弃方案”或“未来脑洞”当成可用语法。
@@ -62,6 +62,31 @@ description: Generate, edit, render, and inspect deterministic SVG graphics with
 - `@name` 不赋值表示必填项；`@name=value` 表示带默认值的可选项。根文档中的必填声明必须提供，ref 调用点则用 `set.name=value` 覆盖。
 - ref 定义只读自己文件里的声明，不自动读取调用方环境；调用方可以用 `set.name=@name` 把当前值显式转发给嵌套 ref。没有隐式全局主题或通用算术。
 - 相对关系仍优先用 `pw/ph/w/h`；明确需要固定尺寸、像素对齐或 UI 间距时使用 `px`，不要自动混写猜测意图。
+
+## 使用共享声明文件
+
+多个文件需要同一组语义色、默认值或样式时，把声明放进只含声明的 `.txt`，再显式引用完整文件名：
+
+```text
+# theme.txt
+@accent=#58a6ff
+@text.primary=#c9d1d9
+.accent_text = color=@accent; size=8
+```
+
+```text
+use=theme.txt
+
+[
+  text="BRANCH"; class=accent_text
+]
+```
+
+- 一个文档最多一个 `use`；只接受当前目录的完整本地 `.txt` 文件名，不支持 URL、路径跳转或嵌套 use。
+- 共享文件只能包含 `@` 和 `.class` 声明，不能包含 primitive；其中声明必须带默认值，不能放必填项。
+- 本地与共享声明重名就报错，不设计覆盖优先级。本地尺寸声明可以引用共享默认值，例如 `@double=2@margin`。
+- 修改共享文件会改变所有使用方的默认值；`set.` 仍只覆盖对应 ref 实例。嵌套组件继续用 `set.accent=@accent` 显式转发。
+- 共享样式的 `class.code` 指向共享文件中的真实定义范围，不是使用方文件的同偏移位置。
 
 ## 使用文字与引号
 
@@ -255,7 +280,7 @@ lining=1px,2px,3px,4px       上、右、下、左
 - 只允许 `color/fill/font/size` 四类样式属性。`x/y/w/h/anchor/lining/ref/text/image` 不允许进入样式，避免变成布局或节点宏。
 - 一个 primitive 最多一个 class；样式不能引用其他样式，也没有继承、条件、repeat 或多 class 组合。
 - 展开 key 与手写 key 冲突就报错，例如 `class=muted;color=#ffffff`，不做 CSS 式覆盖。
-- 样式按文件隔离，没有 `set.class` 或跨文件 class 覆盖；样式内可以引用 `@accent`，实例的 `set.accent` 会改变展开结果。
+- 样式默认按文件隔离；需要共享时显式 `use=theme.txt`。没有 `set.class` 或任意跨文件覆盖。样式内可以引用 `@accent`，实例的 `set.accent` 会改变展开结果。
 - 节点的 `code` 仍指向应用点；`content_metadata.class` 保存样式名和 `class.code`，用于定位文件头中的样式定义。
 - `$` 继续保持 reserved，不参与当前样式语法。
 
@@ -270,7 +295,7 @@ lining=1px,2px,3px,4px       上、右、下、左
 
 ## 排版
 
-使用多行文本让修改像局部代码编辑。将类型头放在第一位，将 `|` 单独放在一行。推荐随后排列类型配置、anchor 或 `x、y、w、h、xo、yo`、`fill、color`。格式化时不重排 primitive，不无意义地改写等价数值形式。
+使用多行文本让修改像局部代码编辑。将类型头放在第一位，将 `|` 单独放在一行。默认缩进两格；短 primitive 可合并成一行，长参数调用仍按属性拆行。推荐随后排列类型配置、anchor 或 `x、y、w、h、xo、yo`、`fill、color`。格式化时不重排 primitive，不无意义地改写等价数值形式。
 
 ## 渲染与检查
 
@@ -319,7 +344,7 @@ CLI 的 stdout 和 stderr 固定使用 UTF-8，包括 Windows 管道输出；sub
 python3 scripts/layerlang_mvp.py self-test
 ```
 
-确保 92 项自测全部通过。
+确保 98 项自测全部通过。
 
 ## 绝对像素与复杂局部
 
@@ -340,7 +365,7 @@ python3 scripts/layerlang_mvp.py self-test
 - 普通 primitive 和 ref 没有固有尺寸，不要使用 `a`；ref 必须显式写 `w/h`。
 - 引号只在值首生效；不要发明单引号、`\n` 或其他转义。
 - ref 报错时沿 `@定义名` 路径和引用链定位，不要通过暴露内部属性绕开封装。
-- 用户要求表达式、裁剪、多行富文本、URL 图片、跨层属性访问、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.10，不要发明临时语法。
+- 用户要求表达式、裁剪、多行富文本、URL 图片、跨层属性访问、自定义 sugar 或 anchor 后间距时，说明它们尚未进入 v0.11，不要发明临时语法。
 
 ## 视觉反馈
 

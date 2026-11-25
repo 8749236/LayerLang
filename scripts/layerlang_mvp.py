@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Layerlang v0.10：矩形、文字、本地图片、参数化本地引用、文件内常量、lining、样式属性包与可溯源图层检查。
+"""Layerlang v0.11：矩形、文字、本地图片、参数化本地引用、共享声明、lining、样式属性包与可溯源图层检查。
 
 依赖：Python 标准库与 Pillow。
   python3 layerlang_mvp.py self-test
@@ -32,7 +32,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-SPEC_VERSION = "0.10"
+SPEC_VERSION = "0.11"
 HERE = Path(__file__).resolve().parent
 
 
@@ -118,6 +118,8 @@ class StyleSpec:
     attrs: dict[str, Attr]
     position: int
     end: int
+    source_path: Optional[str] = None
+    source_text: Optional[str] = None
 
 
 @dataclass
@@ -125,6 +127,7 @@ class ParsedDocument:
     groups: list[Group]
     constant_specs: list[ConstantSpec]
     style_specs: list[StyleSpec] = field(default_factory=list)
+    use: Optional[Attr] = None
 
 
 @dataclass(frozen=True)
@@ -163,21 +166,24 @@ class Parser:
         groups: list[Group] = []
         constants: list[ConstantSpec] = []
         styles: list[StyleSpec] = []
+        use: Optional[Attr] = None
         self.skip_space()
-        while self.pos < len(self.source) and self.source[self.pos] in "@.":
+        while self.pos < len(self.source) and (self.source[self.pos] in "@." or self.source.startswith("use=", self.pos)):
             if self.source[self.pos] == "@":
                 constants.append(self.parse_constant())
-            else:
+            elif self.source[self.pos] == ".":
                 styles.append(self.parse_style())
+            else:
+                if use is not None:
+                    raise self.error("一个文档最多只能 use 一个共享声明文件", self.pos)
+                use = self.parse_use()
             self.skip_space()
         while self.pos < len(self.source):
             if self.source[self.pos] != "[":
                 raise self.error("常量声明只能位于文档开头；顶层 primitive 由 [ ] 包裹")
             groups.append(self.parse_group())
             self.skip_space()
-        if not groups:
-            raise self.error("文档为空", 0)
-        return ParsedDocument(groups, constants, styles)
+        return ParsedDocument(groups, constants, styles, use)
 
     def parse_constant(self) -> ConstantSpec:
         start = self.pos
@@ -274,6 +280,30 @@ class Parser:
         if not attrs:
             raise LangError(f"样式 {name} 不能为空", self.source, start)
         return StyleSpec(name, attrs, start, self.pos)
+
+    def parse_use(self) -> Attr:
+        start = self.pos
+        self.pos += 4  # use=
+        while self.pos < len(self.source) and self.source[self.pos] in " \t":
+            self.pos += 1
+        value_start = self.pos
+        quoted = self.pos < len(self.source) and self.source[self.pos] == '"'
+        if quoted:
+            value, _ = self.parse_quoted_value("\r\n", False)
+        else:
+            while self.pos < len(self.source) and not self.source[self.pos].isspace():
+                self.pos += 1
+            value = self.source[value_start:self.pos]
+        if (
+            not value or value in {".", ".."} or "/" in value or "\\" in value or "@" in value
+            or not value.endswith(".txt") or value == ".txt"
+        ):
+            raise LangError("use 只接受当前目录的完整本地 .txt 文件名", self.source, value_start)
+        while self.pos < len(self.source) and self.source[self.pos] in " \t":
+            self.pos += 1
+        if self.pos < len(self.source) and self.source[self.pos] not in "\r\n":
+            raise LangError("use 声明每行只能有一个文件名", self.source, self.pos)
+        return Attr("use", value, value_start, quoted)
 
     def parse_group(self) -> Group:
         start = self.pos
@@ -576,6 +606,45 @@ def apply_styles(document: ParsedDocument, source: str) -> ParsedDocument:
 
     groups = [Group(apply(group.base), [apply(child) for child in group.children]) for group in document.groups]
     return ParsedDocument(groups, document.constant_specs, document.style_specs)
+
+
+def resolve_use(document: ParsedDocument, source: str, resource_dir: Path) -> ParsedDocument:
+    if document.use is None:
+        return document
+    attr = document.use
+    target = (resource_dir / attr.value).resolve()
+    try:
+        theme_source = read_source_text(target)
+    except OSError as error:
+        raise LangError(f"无法读取共享声明 {str(target)!r}：{error}", source, attr.position) from error
+    try:
+        theme = parse(theme_source)
+        if theme.groups or theme.use is not None:
+            raise LangError("use 文件只能包含常量与样式声明，不能包含 primitive 或嵌套 use", theme_source, 0)
+        if any(spec.value is None for spec in theme.constant_specs):
+            raise LangError("use 文件中的声明必须带默认值，不能包含必填项", theme_source, 0)
+        theme = apply_styles(theme, theme_source)
+        resolve_constants(theme.constant_specs, theme_source)
+    except LangError as error:
+        error.source_path = str(target)
+        raise
+    for style in theme.style_specs:
+        style.source_path = str(target)
+        style.source_text = theme_source
+    local_constants = declaration_names(document.constant_specs)
+    shared_constants = declaration_names(theme.constant_specs)
+    local_styles = {style.name for style in document.style_specs}
+    shared_styles = {style.name for style in theme.style_specs}
+    constant_conflicts = local_constants & shared_constants
+    style_conflicts = local_styles & shared_styles
+    if constant_conflicts or style_conflicts:
+        raise LangError(f"本地声明与 use 文件重名：{sorted(constant_conflicts | style_conflicts)}", source, attr.position)
+    return ParsedDocument(
+        document.groups,
+        [*theme.constant_specs, *document.constant_specs],
+        [*theme.style_specs, *document.style_specs],
+        None,
+    )
 
 
 def dimension_text(dimension: Dimension) -> str:
@@ -978,7 +1047,7 @@ def _evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Pa
             except OSError as error:
                 raise EvaluationError(f"无法读取 ref 定义 {str(target)!r}：{error}", code, path) from error
             try:
-                document = apply_styles(parse(definition_source), definition_source)
+                document = apply_styles(resolve_use(parse(definition_source), definition_source, target.parent), definition_source)
                 resolve_constants(document.constant_specs, definition_source)
             except LangError as error:
                 error.source_path = str(target)
@@ -1078,7 +1147,7 @@ def _evaluate_node(spec, parent, path: str, source: str, constants: dict[str, Pa
     if spec.style is not None:
         node.metadata["class"] = {
             "name": spec.style.name,
-            "code": make_code_location(source, spec.style.position, spec.style.end, current_source),
+            "code": make_code_location(spec.style.source_text or source, spec.style.position, spec.style.end, spec.style.source_path or current_source),
         }
     return node
 
@@ -1124,7 +1193,9 @@ def build_scene(source: str, width: int = 1200, height: int = 1200, resource_dir
     context = RefContext(resource_dir=resource_dir, stack=stack)
     canvas = Rect(Fraction(0), Fraction(0), Fraction(width), Fraction(height))
     try:
-        document = apply_styles(parse(source), source)
+        document = apply_styles(resolve_use(parse(source), source, resource_dir), source)
+        if not document.groups:
+            raise LangError("文档为空", source, 0)
         constants = resolve_constants(document.constant_specs, source)
         missing = {spec.name for spec in document.constant_specs if spec.value is None}
         if missing:
@@ -1140,7 +1211,7 @@ def build_scene(source: str, width: int = 1200, height: int = 1200, resource_dir
 def render_svg(scene: Scene) -> str:
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{scene.width}" height="{scene.height}" viewBox="0 0 {scene.width} {scene.height}">',
-        "  <!-- Layerlang v0.10: deterministic layers; content is scaled without preserving aspect ratio. -->",
+        "  <!-- Layerlang v0.11: deterministic layers; content is scaled without preserving aspect ratio. -->",
     ]
     for index, node in enumerate(scene.layers):
         rect = node.rect
@@ -2111,6 +2182,74 @@ class StyleTests(unittest.TestCase):
         self.assertEqual(source[definition["start"]["offset"]:definition["end"]["offset"]], ".muted = color=#6e7681; size=8")
 
 
+class UseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.directory = Path(self.temporary.name)
+        self.theme = self.directory / "theme.txt"
+        self.theme.write_text("@accent=#58a6ff\n@margin=12px\n.muted = color=@accent; size=8\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def build(self, source: str) -> Scene:
+        return build_scene(source, resource_dir=self.directory)
+
+    def test_shared_style_and_provenance_point_to_theme_file(self) -> None:
+        scene = self.build("use=theme.txt\n[text=hello;class=muted]")
+        node = scene.layers[0]
+        self.assertEqual(node.metadata["foreground"], "#58a6ff")
+        self.assertEqual(node.metadata["size_px"], 8)
+        code = node.metadata["class"]["code"]
+        self.assertEqual(code["file"], str(self.theme.resolve()))
+        with self.theme.open("r", encoding="utf-8", newline="") as opened:
+            theme_source = opened.read()
+        self.assertEqual(theme_source[code["start"]["offset"]:code["end"]["offset"]], ".muted = color=@accent; size=8")
+
+    def test_set_override_applies_to_imported_default_and_style(self) -> None:
+        (self.directory / "card.txt").write_text("use=theme.txt\n@label\n[text=@label;class=muted]", encoding="utf-8")
+        scene = self.build("[ref=card;set.label=hello;set.accent=#7ee787;w=100px;h=100px]")
+        internal = scene.layers[1]
+        self.assertEqual(internal.metadata["foreground"], "#7ee787")
+        self.assertEqual(scene.layers[0].metadata["parameters"]["accent"], {"type": "color", "value": "#7ee787"})
+
+    def test_two_layer_theme_override_is_explicitly_forwarded(self) -> None:
+        (self.directory / "row.txt").write_text("use=theme.txt\n[text=row;class=muted]", encoding="utf-8")
+        (self.directory / "panel.txt").write_text("use=theme.txt\n[ref=row;set.accent=@accent;w=100pw;h=100ph]", encoding="utf-8")
+        scene = self.build("[ref=panel;set.accent=#7ee787;w=100px;h=100px]")
+        self.assertEqual(scene.layers[-1].metadata["foreground"], "#7ee787")
+        self.assertEqual(scene.layers[-1].metadata["class"]["code"]["file"], str(self.theme.resolve()))
+
+    def test_local_declarations_can_derive_from_shared_defaults(self) -> None:
+        scene = self.build("use=theme.txt\n@double=2@margin\n[w=@double;h=10px]")
+        self.assertEqual(scene.layers[0].rect.w, 24)
+
+    def test_invalid_shared_files_and_directives_are_rejected(self) -> None:
+        invalid_sources = [
+            "use=theme.txt\nuse=theme.txt\n[text=hello]",
+            "[text=hello]\nuse=theme.txt",
+            "use=theme\n[text=hello]",
+            "use=../theme.txt\n[text=hello]",
+            "use=missing.txt\n[text=hello]",
+        ]
+        for source in invalid_sources:
+            with self.subTest(source=source):
+                with self.assertRaises(LangError):
+                    self.build(source)
+        self.theme.write_text("[text=not-a-theme]", encoding="utf-8")
+        with self.assertRaisesRegex(LangError, "只能包含常量与样式"):
+            self.build("use=theme.txt\n[text=hello]")
+        self.theme.write_text("@required\n", encoding="utf-8")
+        with self.assertRaisesRegex(LangError, "必须带默认值"):
+            self.build("use=theme.txt\n[text=hello]")
+
+    def test_local_shared_name_conflicts_are_rejected(self) -> None:
+        with self.assertRaisesRegex(LangError, "重名"):
+            self.build("use=theme.txt\n@accent=#ffffff\n[text=hello]")
+        with self.assertRaisesRegex(LangError, "重名"):
+            self.build("use=theme.txt\n.muted = color=#ffffff\n[text=hello;class=muted]")
+
+
 class InspectTests(unittest.TestCase):
     def run_inspect(self, source: str, *arguments: str, width: int = 100, height: int = 100, refs: bool = False) -> dict[str, object]:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2274,7 +2413,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is not None:
             reconfigure(encoding="utf-8")
-    parser = argparse.ArgumentParser(description="Layerlang v0.10 渲染器")
+    parser = argparse.ArgumentParser(description="Layerlang v0.11 渲染器")
     subparsers = parser.add_subparsers(dest="command", required=True)
     render_parser = subparsers.add_parser("render")
     render_parser.add_argument("input")
@@ -2309,6 +2448,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             loader.loadTestsFromTestCase(LiningTests),
             loader.loadTestsFromTestCase(ParameterTests),
             loader.loadTestsFromTestCase(StyleTests),
+            loader.loadTestsFromTestCase(UseTests),
             loader.loadTestsFromTestCase(InspectTests),
             loader.loadTestsFromTestCase(CliTests),
             loader.loadTestsFromTestCase(ErrorContextTests),
